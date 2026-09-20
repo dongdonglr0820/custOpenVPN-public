@@ -1,0 +1,314 @@
+name: build-clients
+
+# 触发：手动 dispatch / 打 v* tag；ci/final-validation 分支用于一次性全平台验收
+on:
+  workflow_dispatch:
+    inputs:
+      only:
+        description: "只构建某个平台（调试用；默认 all 全平台）"
+        type: choice
+        options:
+          - all
+          - linux
+          - windows
+          - macos
+        default: all
+  push:
+    branches: ["ci/final-validation"]
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-clients-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # ==== 升级基线（跟着上游改这三项 + patches/ 里的补丁文件）====
+  OPENVPN_REF: v2.7.7
+  OPENVPN_BUILD_REF: release/2.7
+  PATCH_FILE: patches/openvpn-peerinfo-spoof-2.7.7.patch
+  # ==== 自定义版本：<上游>-<XY_VERSION>-<XY_DATE>，每次自定义发布 xyN +1 ====
+  XY_VERSION: xy1
+  # Linux 构建容器（默认全静态单文件，兼容面最大）
+  LINUX_BUILD_IMAGE: ubuntu:22.04
+
+jobs:
+  windows-msi:
+    name: windows-msi-${{ matrix.arch }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'windows' }}
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64, x86]
+    env:
+      WIX: ${{ github.workspace }}\wix\
+      VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg_cache,readwrite
+    steps:
+      - name: Checkout custOpenVPN
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: cust
+
+      - name: Checkout openvpn-build (${{ env.OPENVPN_BUILD_REF }})
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: OpenVPN/openvpn-build
+          ref: ${{ env.OPENVPN_BUILD_REF }}
+          path: openvpn-build
+          fetch-depth: 0
+          submodules: true
+
+      - name: Compute release date (UTC)
+        shell: pwsh
+        run: |
+          $d = (Get-Date).ToUniversalTime().ToString('yyyyMMdd')
+          "XY_DATE=$d" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "XY_DATE=$d"
+
+      - name: Pin openvpn source to ${{ env.OPENVPN_REF }} + fingerprint patch
+        shell: pwsh
+        working-directory: openvpn-build/src/openvpn
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true   # PS 7.3+：原生命令非零退出即失败（防假绿灯）
+          # Windows checkout 的 autocrlf 会把补丁文件转成 CRLF（已实测：报 ssl.c:65 失败）：
+          # 关掉检出转换 + 对补丁做兜底归一化，保证 patch 与源码都是 LF。
+          git config core.autocrlf false
+          git fetch --depth 1 origin "refs/tags/${{ env.OPENVPN_REF }}:refs/tags/${{ env.OPENVPN_REF }}"
+          git checkout --force --detach "${{ env.OPENVPN_REF }}"
+          $patchPath = "$env:GITHUB_WORKSPACE\cust\${{ env.PATCH_FILE }}"
+          $lf = [System.IO.File]::ReadAllText($patchPath).Replace("`r`n", "`n")
+          [System.IO.File]::WriteAllText($patchPath, $lf)
+          git apply $patchPath
+          if (-not (Select-String -Quiet -Pattern 'IV_DISK=' src/openvpn/ssl.c)) {
+            throw "fingerprint patch not applied (IV_DISK= not found in ssl.c)"
+          }
+          git --no-pager log -1 --oneline
+
+      - name: Apply custom version/branding stamp
+        shell: pwsh
+        working-directory: openvpn-build/windows-msi
+        run: |
+          & "$env:GITHUB_WORKSPACE\cust\branding\windows\apply-branding.ps1" `
+            -XyVersion "${{ env.XY_VERSION }}" `
+            -XyDate "$env:XY_DATE" `
+            -CoreVersionM4 "$env:GITHUB_WORKSPACE\openvpn-build\src\openvpn\version.m4"
+
+      - name: Restore vcpkg cache
+        id: vcpkg-restore
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: vcpkg-${{ matrix.arch }}-${{ hashFiles('openvpn-build/src/openvpn/contrib/vcpkg-manifests/windows/vcpkg.json', 'openvpn-build/src/vcpkg/ports/openssl/vcpkg.json') }}
+          restore-keys: |
+            vcpkg-${{ matrix.arch }}-
+
+      - name: Resolve vcpkg baseline commit
+        shell: pwsh
+        run: |
+          # run-vcpkg 默认从 workspace 根跑 `git submodule status` 找 vcpkg 基线；
+          # 我们的 workspace 根不是 git 仓库（两个 checkout 并行放置），必须显式解析。
+          $line = git -C openvpn-build submodule status src/vcpkg
+          if ($line -notmatch '([0-9a-f]{40})') { throw "cannot parse vcpkg pin from: $line" }
+          "VCPKG_PIN=$($Matches[1])" | Out-File -FilePath $env:GITHUB_ENV -Append
+          Write-Host "vcpkg pin = $($Matches[1])"
+
+      - name: Install vcpkg
+        uses: lukka/run-vcpkg@b1a0dd252f06b9e25b3c022a9a03bd7a427fb6a2 # v11.6
+        with:
+          vcpkgDirectory: ${{ github.workspace }}/openvpn-build/src/vcpkg
+          vcpkgGitCommitId: ${{ env.VCPKG_PIN }}
+          vcpkgJsonGlob: '**/openvpn-build/src/openvpn/contrib/vcpkg-manifests/windows/vcpkg.json'
+
+      - name: Get latest CMake and ninja
+        uses: lukka/get-cmake@fffaaafeea488556c2c12dad60690008bc1caacb # v4.4.2
+
+      - name: Install rst2html
+        run: python -m pip install --upgrade pip docutils
+
+      - name: Setup MSVC prompt
+        uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
+
+      - name: Install WiX 3.14.1
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" -OutFile wix.zip
+          Expand-Archive -Path .\wix.zip -DestinationPath wix\bin
+
+      - name: Build MSI
+        working-directory: openvpn-build/windows-msi
+        run: .\build-and-package.ps1 -arch ${{ matrix.arch }}
+
+      - name: Validate MSI artifact
+        shell: pwsh
+        working-directory: openvpn-build/windows-msi
+        run: |
+          $expected = "image\\OpenVPN-2.7.7-I001-${{ env.XY_VERSION }}-$env:XY_DATE-${{ matrix.arch }}.msi"
+          if (-not (Test-Path $expected)) { throw "expected MSI not found: $expected" }
+          $size = (Get-Item $expected).Length
+          if ($size -lt 1MB) { throw "MSI unexpectedly small: $size bytes" }
+          Get-FileHash -Algorithm SHA256 $expected | Format-List
+
+      - name: Upload MSI
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-msi-${{ matrix.arch }}
+          path: openvpn-build/windows-msi/image/*-${{ matrix.arch }}.msi
+          archive: false
+          if-no-files-found: error
+
+      - name: Save vcpkg cache
+        if: steps.vcpkg-restore.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ github.workspace }}/vcpkg_cache
+          key: ${{ steps.vcpkg-restore.outputs.cache-primary-key }}
+
+  linux:
+    name: linux-${{ matrix.arch }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'linux' }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
+    steps:
+      - name: Checkout custOpenVPN
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Compute release date (UTC)
+        run: |
+          echo "XY_DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+          echo "XY_DATE=$XY_DATE"
+
+      # arm64 走 QEMU 模拟。若私有仓库有原生 arm64 runner（ubuntu-24.04-arm），
+      # 可把 matrix 换成原生并删掉这一步（更快）。
+      - name: Enable arm64 emulation (QEMU)
+        if: matrix.arch == 'arm64'
+        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
+
+      - name: Build in container (static single file)
+        env:
+          OPENVPN_REF: ${{ env.OPENVPN_REF }}
+          XY_VERSION: ${{ env.XY_VERSION }}
+        run: |
+          mkdir -p out
+          docker run --rm --platform ${{ matrix.platform }} \
+            -v "$PWD:/cust:ro" -v "$PWD/out:/out" \
+            -e OPENVPN_REF -e XY_VERSION -e XY_DATE \
+            -e STATIC=1 \
+            -e "PATCH_FILE=/cust/${{ env.PATCH_FILE }}" \
+            "${{ env.LINUX_BUILD_IMAGE }}" \
+            bash /cust/scripts/build-linux-in-container.sh ${{ matrix.arch }}
+
+      - name: End-to-end peer-info handshake
+        if: matrix.arch == 'amd64'
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -rf e2e-artifact
+          mkdir -p e2e-artifact
+          tarball="$(ls out/openvpn-*-linux-amd64.tar.gz)"
+          tar -xzf "$tarball" -C e2e-artifact
+          bin="$(find e2e-artifact -type f -path '*/bin/openvpn' -print -quit)"
+          test -n "$bin"
+          E2E_WORK_DIR="$PWD/e2e-peerinfo-logs" \
+          EXPECTED_VERSION="2.7.7-${XY_VERSION}-${XY_DATE}" \
+            bash scripts/e2e-peerinfo.sh "$bin"
+
+      - name: Upload E2E diagnostics
+        if: ${{ always() && matrix.arch == 'amd64' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-peerinfo-linux-amd64
+          path: |
+            e2e-peerinfo-logs/server.log
+            e2e-peerinfo-logs/client.log
+            e2e-peerinfo-logs/client-missing-disk.log
+            e2e-peerinfo-logs/client-connect-valid.env
+            e2e-peerinfo-logs/client-connect-missing-disk.env
+            e2e-peerinfo-logs/client-connect.env
+          if-no-files-found: warn
+
+      - name: Upload Linux artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-${{ matrix.arch }}
+          path: out/*.tar.gz*
+          if-no-files-found: error
+
+  macos-tunnelblick:
+    name: macos-tunnelblick (experimental, unsigned)
+    # 验收分支 / tag 自动构建；手动触发时仍可只跑 macOS
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'macos' }}
+    runs-on: macos-15
+    timeout-minutes: 300
+    env:
+      TUNNELBLICK_REF: v9.0.1
+    steps:
+      - name: Checkout custOpenVPN
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          path: cust
+
+      - name: Checkout Tunnelblick (${{ env.TUNNELBLICK_REF }})
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Tunnelblick/Tunnelblick
+          ref: ${{ env.TUNNELBLICK_REF }}
+          path: tunnelblick
+          fetch-depth: 1
+
+      - name: Compute release date (UTC)
+        run: |
+          echo "XY_DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
+          echo "XY_DATE=$XY_DATE"
+
+      - name: Select newest Xcode + install build prerequisites
+        run: |
+          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
+          sudo softwareupdate --install-rosetta --agree-to-license || true
+          brew install autoconf automake libtool
+          xcodebuild -version
+
+      - name: Build patched Tunnelblick (third_party + app)
+        working-directory: tunnelblick
+        env:
+          CUST_DIR: ${{ github.workspace }}/cust
+          XY_VERSION: ${{ env.XY_VERSION }}
+        run: |
+          # 只保留 openvpn-2.7.7，缩短第三方构建时间（自定义客户端不需要旧版 openvpn）
+          mv third_party/sources/openvpn/openvpn-2.5_git_37160ee /tmp/ 2>/dev/null || true
+          mv third_party/sources/openvpn/openvpn-2.6.22 /tmp/ 2>/dev/null || true
+          bash "$CUST_DIR/scripts/build-macos-tunnelblick.sh"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-tunnelblick
+          path: tunnelblick/out/*
+          if-no-files-found: error
+
+  final-gate:
+    name: final-all-platforms-gate
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.only == 'all') }}
+    needs: [windows-msi, linux, macos-tunnelblick]
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Require every platform to pass
+        env:
+          WINDOWS_RESULT: ${{ needs.windows-msi.result }}
+          LINUX_RESULT: ${{ needs.linux.result }}
+          MACOS_RESULT: ${{ needs.macos-tunnelblick.result }}
+        run: |
+          echo "windows=$WINDOWS_RESULT linux=$LINUX_RESULT macos=$MACOS_RESULT"
+          test "$WINDOWS_RESULT" = success
+          test "$LINUX_RESULT" = success
+          test "$MACOS_RESULT" = success
+          echo "ALL PLATFORMS PASSED"

@@ -1,0 +1,52 @@
+--- a/src/openvpn/ssl.c	2026-06-29 17:02:44.000000000 +0800
++++ b/src/openvpn/ssl.c	2026-06-29 16:46:42.129777411 +0800
+@@ -65,6 +65,7 @@
+ 
+ #include "memdbg.h"
+ #include "openvpn.h"
++#include "env_set.h" /* peer-info spoof: get_env() for IV_PLAT override */
+ 
+ #ifdef MEASURE_TLS_HANDSHAKE_STATS
+ 
+@@ -2054,7 +2055,10 @@
+         /* push version */
+         buf_printf(&out, "IV_VER=%s\n", PACKAGE_VERSION);
+ 
+-        /* push platform */
++        /* push platform (peer-info spoof: skip built-in value if the
++         * config overrides it via `setenv IV_PLAT ...`) */
++        if (!env_set_get(session->opt->es, "IV_PLAT"))
++        {
+ #if defined(TARGET_LINUX)
+         buf_printf(&out, "IV_PLAT=linux\n");
+ #elif defined(TARGET_SOLARIS)
+@@ -2072,6 +2076,7 @@
+ #elif defined(_WIN32)
+         buf_printf(&out, "IV_PLAT=win\n");
+ #endif
++        }
+         /* Announce that we do not require strict sequence numbers with
+          * TCP. (TCP non-linear) */
+         buf_printf(&out, "IV_TCPNL=1\n");
+@@ -2162,7 +2167,9 @@
+         if (session->opt->push_peer_info_detail > 1)
+         {
+             struct env_set *es = session->opt->es;
+-            /* push env vars that begin with UV_, IV_PLAT_VER and IV_GUI_VER */
++            /* push env vars that begin with UV_, IV_PLAT_VER and IV_GUI_VER
++             * (peer-info spoof: also forward corp device-fingerprint vars set
++             * via `setenv IV_PLAT/IV_USER/IV_INFO/IV_DISK ...`) */
+             for (struct env_item *e = es->list; e != NULL; e = e->next)
+             {
+                 if (e->string)
+@@ -2172,6 +2179,10 @@
+                           && session->opt->push_peer_info_detail > 2)
+                          || (strncmp(e->string, "IV_GUI_VER=", sizeof("IV_GUI_VER=") - 1) == 0)
+                          || (strncmp(e->string, "IV_SSO=", sizeof("IV_SSO=") - 1) == 0)
++                         || (strncmp(e->string, "IV_PLAT=", sizeof("IV_PLAT=") - 1) == 0)
++                         || (strncmp(e->string, "IV_USER=", sizeof("IV_USER=") - 1) == 0)
++                         || (strncmp(e->string, "IV_INFO=", sizeof("IV_INFO=") - 1) == 0)
++                         || (strncmp(e->string, "IV_DISK=", sizeof("IV_DISK=") - 1) == 0)
+                          )
+                         && buf_safe(&out, strlen(e->string) + 1))
+                     {

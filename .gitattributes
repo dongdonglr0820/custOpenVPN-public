@@ -1,0 +1,9 @@
+# 本仓库需要保证 LF：补丁文件一旦在 Windows checkout 时被转成 CRLF，
+# git apply 会因上下文带 \r 而失败（曾致 CI 的 Windows pin 步骤报 ssl.c:65 失败）。
+* text=auto eol=lf
+
+# 明确声明（自文档化；上面一行已覆盖）
+*.patch text eol=lf
+*.diff  text eol=lf
+*.sh    text eol=lf
+*.ps1   text eol=lf

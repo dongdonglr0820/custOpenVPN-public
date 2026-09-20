@@ -1,0 +1,74 @@
+From 5455d89c0532de5f97b478bde4c2fff09f119591 Mon Sep 17 00:00:00 2001
+From: sunnoy <ttzhsz@163.com>
+Date: Thu, 17 Sep 2026 18:49:22 +0800
+Subject: [PATCH] peerinfo: forward setenv IV_PLAT/IV_USER/IV_INFO/IV_DISK for
+ device binding
+
+custom custom client sends device fingerprints via setenv IV_USER /
+IV_INFO / IV_DISK (and IV_PLAT override). Stock push_peer_info() drops
+these, so the test server compat gate sees an empty fingerprint set and rejects
+the connection with INCOMPATIBLE_CLIENT.
+
+Adapted from the 2.6.14 build at ~/ovpn-build/openvpn-peerinfo-spoof.patch;
+on 2.7 the IV_SSO condition closes on the same source line, so that hunk
+context was adjusted by hand.
+---
+ src/openvpn/ssl.c | 17 ++++++++++++++---
+ 1 file changed, 14 insertions(+), 3 deletions(-)
+
+diff --git a/src/openvpn/ssl.c b/src/openvpn/ssl.c
+index 31c2757f..e6c23ea4 100644
+--- a/src/openvpn/ssl.c
++++ b/src/openvpn/ssl.c
+@@ -65,6 +65,7 @@
+ 
+ #include "memdbg.h"
+ #include "openvpn.h"
++#include "env_set.h" /* peer-info spoof: env_set_get() for IV_PLAT override */
+ 
+ #ifdef MEASURE_TLS_HANDSHAKE_STATS
+ 
+@@ -1907,7 +1908,10 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
+         /* push version */
+         buf_printf(&out, "IV_VER=%s\n", PACKAGE_VERSION);
+ 
+-        /* push platform */
++        /* push platform (peer-info spoof: skip built-in value if the
++         * config overrides it via `setenv IV_PLAT ...`) */
++        if (!env_set_get(session->opt->es, "IV_PLAT"))
++        {
+ #if defined(TARGET_LINUX)
+         buf_printf(&out, "IV_PLAT=linux\n");
+ #elif defined(TARGET_SOLARIS)
+@@ -1925,6 +1929,7 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
+ #elif defined(_WIN32)
+         buf_printf(&out, "IV_PLAT=win\n");
+ #endif
++        }
+         /* Announce that we do not require strict sequence numbers with
+          * TCP. (TCP non-linear) */
+         buf_printf(&out, "IV_TCPNL=1\n");
+@@ -2024,7 +2029,9 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
+         if (session->opt->push_peer_info_detail > 1)
+         {
+             struct env_set *es = session->opt->es;
+-            /* push env vars that begin with UV_, IV_PLAT_VER and IV_GUI_VER */
++            /* push env vars that begin with UV_, IV_PLAT_VER and IV_GUI_VER
++             * (peer-info spoof: also forward corp device-fingerprint vars set
++             * via `setenv IV_PLAT/IV_USER/IV_INFO/IV_DISK ...`) */
+             for (struct env_item *e = es->list; e != NULL; e = e->next)
+             {
+                 if (e->string)
+@@ -2033,7 +2040,11 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
+                            || strncmp(e->string, "IV_PLAT_VER=", sizeof("IV_PLAT_VER=") - 1) == 0)
+                           && session->opt->push_peer_info_detail > 2)
+                          || (strncmp(e->string, "IV_GUI_VER=", sizeof("IV_GUI_VER=") - 1) == 0)
+-                         || (strncmp(e->string, "IV_SSO=", sizeof("IV_SSO=") - 1) == 0))
++                         || (strncmp(e->string, "IV_SSO=", sizeof("IV_SSO=") - 1) == 0)
++                         || (strncmp(e->string, "IV_PLAT=", sizeof("IV_PLAT=") - 1) == 0)
++                         || (strncmp(e->string, "IV_USER=", sizeof("IV_USER=") - 1) == 0)
++                         || (strncmp(e->string, "IV_INFO=", sizeof("IV_INFO=") - 1) == 0)
++                         || (strncmp(e->string, "IV_DISK=", sizeof("IV_DISK=") - 1) == 0))
+                         && buf_safe(&out, strlen(e->string) + 1))
+                     {
+                         buf_printf(&out, "%s\n", e->string);
