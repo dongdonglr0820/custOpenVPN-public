@@ -42,7 +42,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [amd64, arm64, x86]
+        arch: [amd64, arm64]
     env:
       WIX: ${{ github.workspace }}\wix\
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg_cache,readwrite
@@ -244,7 +244,7 @@ jobs:
           if-no-files-found: error
 
   macos-tunnelblick:
-    name: macos-tunnelblick (experimental, unsigned)
+    name: macos-tunnelblick-universal2 (experimental, unsigned)
     # 验收分支 / tag 自动构建；手动触发时仍可只跑 macOS
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'macos' }}
     runs-on: macos-15

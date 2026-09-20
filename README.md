@@ -53,7 +53,7 @@ custOpenVPN/
 
 ## CI（.github/workflows/build-clients.yml）
 
-- **windows-msi**：`windows-2022` × [amd64, arm64, x86]。checkout openvpn-build
+- **windows-msi**：`windows-2022` × [amd64, arm64]。checkout openvpn-build
   `release/2.7`（含 vcpkg/WiX 工具链）→ 把 `src/openvpn` 换成 v2.7.7 + 打指纹补丁 →
   打 xy 版本戳 → `build-and-package.ps1` 出 MSI（未签名，签名后续接）。
 - **linux**：容器内构建（默认 `ubuntu:22.04`）× [amd64, arm64]。**默认全静态单文件**
@@ -71,10 +71,10 @@ custOpenVPN/
   把 peerinfo 补丁 + 现场生成的版本戳补丁注入其
   `third_party/sources/openvpn/openvpn-2.7.7/patches/` → `make -C third_party` →
   `xcodebuild -alltargets Release`（工程内置的 BuildAppsAndDmgs.sh 自动打包/adhoc 签名）→
-  产物 `Tunnelblick-9.0.1-openvpn-2.7.7-xy1-20260917-unsigned.zip`（+ dmg 若生成）。
+  产物 `Tunnelblick-9.0.1-openvpn-2.7.7-xy1-20260917-unsigned.zip`（+ dmg 若生成），并强制校验内嵌 OpenVPN 为 Universal 2（`x86_64 + arm64`），同时兼容 Intel Mac 与 Apple Silicon。
   只在**手动触发或打 tag** 时构建（macOS runner 分钟数贵）；首次运行可能需要调优。
 - 触发：`workflow_dispatch` / push `v*` tag；`ci/final-validation` 分支临时用于全平台验收。
-- **最终 gate**：Windows 三架构、Linux 两架构（含 amd64 peer-info E2E）、macOS 全部成功才通过。
+- **最终 gate**：Windows 两架构（amd64/arm64）、Linux 两架构（含 amd64 peer-info E2E）、macOS Universal 2 全部成功才通过。
   workflow 配置 concurrency，同一 ref 新提交会取消被替代的旧验收 run。
 - 私有仓库注意：Actions 分钟数计费，Windows 首次构建（vcpkg 全量）较慢，
   vcpkg 缓存已配置（第二次起明显加快）。
