@@ -8,7 +8,7 @@
 #   OPENVPN_REF   上游 tag（默认 v2.7.7）
 #   XY_VERSION    定制序号（默认 xy1）
 #   XY_DATE       发版日期 YYYYMMDD（默认取构建当天 UTC；CI 会显式传入保持跨平台一致）
-#   PATCH_FILE    peerinfo 补丁绝对路径（默认 /cust/patches/openvpn-peerinfo-spoof-2.7.7.patch）
+#   PATCH_FILE    peerinfo 补丁绝对路径（默认 /cust/patches/openvpn-peerinfo-spoof-<版本>.patch）
 #   OUT_DIR       产物目录（默认 /out）
 #   STATIC        1=全静态单文件（默认 1）；0=动态链接
 set -euo pipefail
@@ -18,7 +18,7 @@ OPENVPN_REF="${OPENVPN_REF:-v2.7.7}"
 XY_VERSION="${XY_VERSION:-xy1}"
 XY_DATE="${XY_DATE:-$(date -u +%Y%m%d)}"
 XY_SUFFIX="${XY_VERSION}-${XY_DATE}"
-PATCH_FILE="${PATCH_FILE:-/cust/patches/openvpn-peerinfo-spoof-2.7.7.patch}"
+PATCH_FILE="${PATCH_FILE:-/cust/patches/openvpn-peerinfo-spoof-${OPENVPN_REF#v}.patch}"
 OUT_DIR="${OUT_DIR:-/out}"
 STATIC="${STATIC:-1}"
 
@@ -85,7 +85,7 @@ mkdir -p "$STAGE/bin" "$STAGE/share/doc/openvpn"
 install -m755 src/openvpn/openvpn "$STAGE/bin/openvpn"
 install -m644 COPYING "$STAGE/share/doc/openvpn/COPYING"
 {
-    echo "OpenVPN $VERSION (custom custom build: peer-info fingerprint forwarding)"
+    echo "OpenVPN $VERSION (custom build: peer-info fingerprint forwarding)"
     echo "target: linux/$ARCH"
     echo "source: OpenVPN/openvpn $OPENVPN_REF + $(basename "$PATCH_FILE")"
     echo "link: $([ "$STATIC" = "1" ] && echo "static (single file)" || echo "dynamic")"

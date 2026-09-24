@@ -145,8 +145,16 @@ jobs:
         shell: pwsh
         working-directory: openvpn-build/windows-msi
         run: |
-          $expected = "image\\OpenVPN-2.7.7-I001-${{ env.XY_VERSION }}-$env:XY_DATE-${{ matrix.arch }}.msi"
-          if (-not (Test-Path $expected)) { throw "expected MSI not found: $expected" }
+          # 文件名 = OpenVPN-<openvpn-build 包版本，如 2.7.7-I001>-<xyN>-<日期>-<arch>.msi；
+          # 包版本前缀须与 OPENVPN_REF 一致，否则说明 openvpn-build 分支与核心版本不匹配。
+          $ver = "${{ env.OPENVPN_REF }}".TrimStart('v')
+          $pattern = "image\OpenVPN-$ver-*-${{ env.XY_VERSION }}-$env:XY_DATE-${{ matrix.arch }}.msi"
+          $found = @(Get-ChildItem -Path $pattern -ErrorAction SilentlyContinue)
+          if ($found.Count -ne 1) {
+            Get-ChildItem image -ErrorAction SilentlyContinue | Format-Table Name, Length
+            throw "expected exactly one MSI matching $pattern, found $($found.Count)"
+          }
+          $expected = $found[0].FullName
           $size = (Get-Item $expected).Length
           if ($size -lt 1MB) { throw "MSI unexpectedly small: $size bytes" }
           Get-FileHash -Algorithm SHA256 $expected | Format-List
@@ -219,7 +227,7 @@ jobs:
           bin="$(find e2e-artifact -type f -path '*/bin/openvpn' -print -quit)"
           test -n "$bin"
           E2E_WORK_DIR="$PWD/e2e-peerinfo-logs" \
-          EXPECTED_VERSION="2.7.7-${XY_VERSION}-${XY_DATE}" \
+          EXPECTED_VERSION="${OPENVPN_REF#v}-${XY_VERSION}-${XY_DATE}" \
             bash scripts/e2e-peerinfo.sh "$bin"
 
       - name: Upload E2E diagnostics
@@ -283,9 +291,15 @@ jobs:
           CUST_DIR: ${{ github.workspace }}/cust
           XY_VERSION: ${{ env.XY_VERSION }}
         run: |
-          # 只保留 openvpn-2.7.7，缩短第三方构建时间（自定义客户端不需要旧版 openvpn）
-          mv third_party/sources/openvpn/openvpn-2.5_git_37160ee /tmp/ 2>/dev/null || true
-          mv third_party/sources/openvpn/openvpn-2.6.22 /tmp/ 2>/dev/null || true
+          # 只保留 openvpn-${OPENVPN_REF#v}，缩短第三方构建时间（自定义客户端不需要其它版本 openvpn）
+          keep="openvpn-${OPENVPN_REF#v}"
+          test -d "third_party/sources/openvpn/$keep" || {
+            echo "error: Tunnelblick $TUNNELBLICK_REF 未内置 $keep"; ls third_party/sources/openvpn; exit 1;
+          }
+          for d in third_party/sources/openvpn/*/; do
+            [ "$(basename "$d")" = "$keep" ] || mv "$d" /tmp/
+          done
+          ls third_party/sources/openvpn
           bash "$CUST_DIR/scripts/build-macos-tunnelblick.sh"
 
       - name: Upload macOS artifacts

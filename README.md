@@ -86,6 +86,12 @@ custOpenVPN/
    `git format-patch -1 --stdout > patches/openvpn-peerinfo-spoof-2.7.8.patch`。
 2. 改 workflow 顶部 env：`OPENVPN_REF`、`PATCH_FILE`；`XY_VERSION` 重置为 `xy1`
    （新上游版本从 1 重新计数；发版日期由 CI 自动生成，无需手改）。
+   其余版本相关处（MSI 产物校验、E2E 期望版本、macOS 源码目录/版本戳补丁/产物名）
+   都从这几项推导，无需逐处改。另需确认两处上游配套：
+   - `OPENVPN_BUILD_REF` 分支的 `windows-msi/version.m4` 已跟到新版本（MSI 包版本前缀须与
+     `OPENVPN_REF` 一致，CI 的 MSI 校验会拦截不匹配）；
+   - macOS job 的 `TUNNELBLICK_REF` 对应的 Tunnelblick 已内置
+     `third_party/sources/openvpn/openvpn-<新版本>/`（否则 CI 直接报错），必要时一起升级。
 3. Windows MSI 数字版本 / PRODUCT_CODE 由 `apply-branding.ps1` 自动处理，无需手改。
 4. 本地验证：`./openvpn/src/openvpn/openvpn --version` 应显示 `2.7.8-xy1-<日期>`；
    连通测试环境确认 `IV_USER/IV_INFO/IV_DISK` 上报且服务端
@@ -105,8 +111,8 @@ custOpenVPN/
 
 - [ ] Windows 侧 `IV_*` 值采集/写入逻辑（旧版定制 fork 源码待并入，或重做）
 - [ ] MSI 品牌名/发布者（`PRODUCT_NAME` / `PRODUCT_PUBLISHER`，现暂留 OpenVPN）
-- [x] macOS：Tunnelblick CI 接入（v9.0.1；补丁注入方式已在本地用真实 tarball 验证；
-      第三方向构建 + Xcode 阶段待首次 CI 跑通）
+- [x] macOS：Tunnelblick CI 接入（v9.0.1；第三方构建 + Xcode 阶段已在 CI 跑通，
+      产物校验 Universal 2 + 版本戳 + 指纹补丁）
 - [ ] macOS 品牌 / 正式签名（notarize 需要 Apple 证书；当前只出 adhoc 未签名测试包）
 - [x] Linux 产物：默认全静态单文件（`tar.gz` + sha256；`STATIC=0` 可切动态）
 - [ ] 代码签名（Windows Authenticode；macOS notarize）

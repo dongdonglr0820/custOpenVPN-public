@@ -4,7 +4,7 @@ Date: Thu, 17 Sep 2026 18:49:22 +0800
 Subject: [PATCH] peerinfo: forward setenv IV_PLAT/IV_USER/IV_INFO/IV_DISK for
  device binding
 
-custom custom client sends device fingerprints via setenv IV_USER /
+The custom client sends device fingerprints via setenv IV_USER /
 IV_INFO / IV_DISK (and IV_PLAT override). Stock push_peer_info() drops
 these, so the test server compat gate sees an empty fingerprint set and rejects
 the connection with INCOMPATIBLE_CLIENT.
