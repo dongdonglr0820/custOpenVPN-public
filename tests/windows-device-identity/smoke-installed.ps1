@@ -182,7 +182,9 @@ log client.log
         $server.Kill(); $server.WaitForExit(); $server = $null
 
         # A profile cannot override a native identity, including before TLS starts.
-        $negative = Start-Process $bin -WorkingDirectory $Work -ArgumentList '--config client.ovpn --setenv IV_DISK override --log conflict.log' -PassThru
+        # OpenVPN redirects logs only once, so give the negative profile its own log directive.
+        ((Get-Content -Raw client.ovpn).Replace('log client.log', 'log conflict.log') + "`nsetenv IV_DISK override`n") | Set-Content -Encoding ascii conflict.ovpn
+        $negative = Start-Process $bin -WorkingDirectory $Work -ArgumentList '--config conflict.ovpn' -PassThru
         if (-not $negative.WaitForExit(10000)) { $negative.Kill(); throw 'Conflict was not rejected promptly' }
         if ($negative.ExitCode -eq 0 -or (Get-Content -Raw conflict.log) -notmatch 'DEVICE_IDENTITY_CONFIG_CONFLICT') { throw 'Profile identity override was accepted' }
     } finally { Pop-Location }
