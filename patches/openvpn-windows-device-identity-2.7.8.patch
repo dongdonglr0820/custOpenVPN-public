@@ -1,0 +1,925 @@
+From eac0df53812c3249cf6c33c25c21dc296404df34 Mon Sep 17 00:00:00 2001
+From: sunnoy <ttzhsz@163.com>
+Date: Fri, 23 Oct 2026 11:41:56 +0800
+Subject: [PATCH] windows: collect stable system-disk identity through
+ interactive service
+
+---
+ CMakeLists.txt                         |   7 +
+ include/openvpn-msg.h                  |  20 +-
+ src/openvpn/device_identity_parse.c    | 156 +++++++++++++
+ src/openvpn/device_identity_parse.h    |  19 ++
+ src/openvpn/init.c                     |   8 +
+ src/openvpn/openvpn.c                  |   8 +
+ src/openvpn/options.c                  |   6 +
+ src/openvpn/options.h                  |   1 +
+ src/openvpn/ssl.c                      |  18 +-
+ src/openvpn/ssl_common.h               |   4 +
+ src/openvpn/win_device_identity.c      | 303 +++++++++++++++++++++++++
+ src/openvpn/win_device_identity.h      |  29 +++
+ src/openvpn/win_device_identity_core.c |  66 ++++++
+ src/openvpn/win_device_identity_core.h |   9 +
+ src/openvpnserv/CMakeLists.txt         |   4 +-
+ src/openvpnserv/interactive.c          |  19 ++
+ 16 files changed, 674 insertions(+), 3 deletions(-)
+ create mode 100644 src/openvpn/device_identity_parse.c
+ create mode 100644 src/openvpn/device_identity_parse.h
+ create mode 100644 src/openvpn/win_device_identity.c
+ create mode 100644 src/openvpn/win_device_identity.h
+ create mode 100644 src/openvpn/win_device_identity_core.c
+ create mode 100644 src/openvpn/win_device_identity_core.h
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c92d9ea6..16f0184a 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -622,6 +622,13 @@ set(SOURCE_FILES
+     )
+ 
+ add_executable(openvpn ${SOURCE_FILES})
++if(WIN32)
++    target_sources(openvpn PRIVATE
++        src/openvpn/device_identity_parse.c
++        src/openvpn/win_device_identity.c
++        src/openvpn/win_device_identity_core.c)
++    target_link_libraries(openvpn PRIVATE secur32.lib advapi32.lib)
++endif()
+ 
+ add_library_deps(openvpn)
+ 
+diff --git a/include/openvpn-msg.h b/include/openvpn-msg.h
+index ca9c9038..80ae7b0f 100644
+--- a/include/openvpn-msg.h
++++ b/include/openvpn-msg.h
+@@ -25,6 +25,7 @@
+ 
+ #include <windef.h>
+ #include <ws2tcpip.h>
++#include "win_device_identity.h"
+ 
+ typedef enum
+ {
+@@ -48,7 +49,10 @@ typedef enum
+     msg_set_mtu,
+     msg_add_wins_cfg,
+     msg_del_wins_cfg,
+-    msg_create_adapter
++    msg_create_adapter,
++    /* Private, versioned read-only query; existing message values are unchanged. */
++    msg_xy_device_identity = 0x58590001,
++    msg_xy_device_identity_response = 0x58590002
+ } message_type_t;
+ 
+ typedef struct
+@@ -192,4 +196,18 @@ typedef struct
+     adapter_type_t adapter_type;
+ } create_adapter_message_t;
+ 
++typedef struct
++{
++    message_header_t header;
++    DWORD version;
++} xy_identity_request_t;
++
++typedef struct
++{
++    message_header_t header;
++    DWORD version;
++    xy_identity_error error;
++    xy_hardware_identity identity;
++} xy_identity_response_t;
++
+ #endif /* ifndef OPENVPN_MSG_H_ */
+diff --git a/src/openvpn/device_identity_parse.c b/src/openvpn/device_identity_parse.c
+new file mode 100644
+index 00000000..7d629515
+--- /dev/null
++++ b/src/openvpn/device_identity_parse.c
+@@ -0,0 +1,156 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#include "device_identity_parse.h"
++#include <stdio.h>
++#include <string.h>
++
++bool
++xy_identity_text(const char *src, size_t size, char *out, size_t cap)
++{
++    if (!src || !out || !cap)
++    {
++        return false;
++    }
++    out[0] = '\0';
++    const char *end = memchr(src, '\0', size);
++    if (!end)
++    {
++        return false;
++    }
++    /* Do not trim control characters: newline/tab input must be rejected. */
++    for (const char *p = src; p < end; ++p)
++    {
++        if ((unsigned char)*p < 32 || (unsigned char)*p == 127)
++        {
++            return false;
++        }
++    }
++    while (src < end && *src == ' ')
++    {
++        ++src;
++    }
++    while (end > src && end[-1] == ' ')
++    {
++        --end;
++    }
++    size_t n = (size_t)(end - src);
++    if (!n || n >= cap)
++    {
++        return false;
++    }
++    memcpy(out, src, n);
++    out[n] = '\0';
++    return true;
++}
++
++static bool
++ascii_equal(const char *a, const char *b)
++{
++    while (*a && *b)
++    {
++        unsigned char x = (unsigned char)*a++, y = (unsigned char)*b++;
++        if (x >= 'a' && x <= 'z') { x -= 'a' - 'A'; }
++        if (y >= 'a' && y <= 'z') { y -= 'a' - 'A'; }
++        if (x != y) { return false; }
++    }
++    return *a == *b;
++}
++
++bool
++xy_identity_serial(const char *src, size_t size, char *out, size_t cap)
++{
++    if (!xy_identity_text(src, size, out, cap)) { return false; }
++    const char *invalid[] = { "UNKNOWN", "NONE", "N/A", "NOT SPECIFIED", "NOT PRESENT",
++                              "DEFAULT STRING", "TO BE FILLED BY O.E.M." };
++    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
++    {
++        if (ascii_equal(out, invalid[i])) { out[0] = '\0'; return false; }
++    }
++    bool all_zero = true, all_ff = true;
++    for (const char *p = out; *p; ++p)
++    {
++        if (*p == '_' || *p == '.' || *p == '-' || *p == ' ') { continue; }
++        if (*p != '0') { all_zero = false; }
++        if (*p != 'F' && *p != 'f') { all_ff = false; }
++    }
++    if (all_zero || all_ff) { out[0] = '\0'; return false; }
++    return true;
++}
++
++bool
++xy_identity_descriptor(const unsigned char *buf, size_t size, uint32_t offset,
++                        size_t minimum_offset, char *out, size_t cap)
++{
++    return offset >= minimum_offset && offset < size
++           && xy_identity_serial((const char *)buf + offset, size - offset, out, cap);
++}
++
++bool
++xy_identity_disk(const uint32_t *numbers, size_t count, uint32_t *number)
++{
++    if (!numbers || !count || count > 128 || !number) { return false; }
++    for (size_t i = 1; i < count; ++i)
++    {
++        if (numbers[i] != numbers[0]) { return false; }
++    }
++    *number = numbers[0];
++    return true;
++}
++
++static uint32_t
++read_le32(const unsigned char *p)
++{
++    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16)
++           | ((uint32_t)p[3] << 24);
++}
++
++bool
++xy_identity_smbios(const unsigned char *buf, size_t size, char uuid[37])
++{
++    uuid[0] = '\0';
++    if (!buf || size < 8) { return false; }
++    size_t table_len = read_le32(buf + 4);
++    if (table_len > size - 8) { return false; }
++    const size_t end = 8 + table_len;
++    for (size_t pos = 8; pos + 4 <= end; )
++    {
++        size_t len = buf[pos + 1];
++        if (len < 4 || len > end - pos) { return false; }
++        size_t next = pos + len;
++        while (next + 1 < end && (buf[next] != 0 || buf[next + 1] != 0)) { ++next; }
++        if (next + 1 >= end) { return false; }
++        if (buf[pos] == 1)
++        {
++            if (len < 24) { return false; }
++            const unsigned char *p = buf + pos + 8;
++            bool zero = true, ff = true;
++            for (size_t i = 0; i < 16; ++i)
++            {
++                if (p[i]) { zero = false; }
++                if (p[i] != 255) { ff = false; }
++            }
++            if (zero || ff) { return false; }
++            bool le = buf[1] > 2 || (buf[1] == 2 && buf[2] >= 6);
++            static const unsigned char order[16] = { 3,2,1,0,5,4,7,6,8,9,10,11,12,13,14,15 };
++            unsigned char v[16];
++            for (size_t i = 0; i < 16; ++i) { v[i] = p[le ? order[i] : i]; }
++            snprintf(uuid, 37,
++                     "%02X%02X%02X%02X-%02X%02X-%02X%02X-%02X%02X-%02X%02X%02X%02X%02X%02X",
++                     v[0],v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8],v[9],v[10],v[11],v[12],v[13],v[14],v[15]);
++            return true;
++        }
++        if (buf[pos] == 127) { break; }
++        pos = next + 2;
++    }
++    return false;
++}
++
++bool
++xy_identity_reserved_env(const char *entry)
++{
++    const char *keys[] = { "IV_PLAT=", "IV_USER=", "IV_INFO=", "IV_DISK=", "UV_DEVICE_ID_SCHEMA=" };
++    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); ++i)
++    {
++        if (strncmp(entry, keys[i], strlen(keys[i])) == 0) { return true; }
++    }
++    return false;
++}
+diff --git a/src/openvpn/device_identity_parse.h b/src/openvpn/device_identity_parse.h
+new file mode 100644
+index 00000000..e01e39d9
+--- /dev/null
++++ b/src/openvpn/device_identity_parse.h
+@@ -0,0 +1,19 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef DEVICE_IDENTITY_PARSE_H
++#define DEVICE_IDENTITY_PARSE_H
++#include <stdbool.h>
++#include <stddef.h>
++#include <stdint.h>
++
++#define XY_ID_SCHEMA "win-system-disk-v1"
++#define XY_ID_SERIAL_CAP 128
++#define XY_ID_USER_CAP 512
++
++bool xy_identity_text(const char *src, size_t size, char *out, size_t cap);
++bool xy_identity_serial(const char *src, size_t size, char *out, size_t cap);
++bool xy_identity_descriptor(const unsigned char *buf, size_t size, uint32_t offset,
++                            size_t minimum_offset, char *out, size_t cap);
++bool xy_identity_disk(const uint32_t *numbers, size_t count, uint32_t *number);
++bool xy_identity_smbios(const unsigned char *buf, size_t size, char uuid[37]);
++bool xy_identity_reserved_env(const char *entry);
++#endif
+diff --git a/src/openvpn/init.c b/src/openvpn/init.c
+index 2f09b0f7..6cfdc86a 100644
+--- a/src/openvpn/init.c
++++ b/src/openvpn/init.c
+@@ -31,6 +31,7 @@
+ #endif
+ 
+ #include "win32.h"
++#include "win_device_identity_core.h"
+ #include "init.h"
+ #include "run_command.h"
+ #include "sig.h"
+@@ -3363,6 +3364,13 @@ do_init_crypto_tls(struct context *c, const unsigned int flags)
+     to.verify_hash_no_ca = options->verify_hash_no_ca;
+     memcpy(to.x509_username_field, options->x509_username_field, sizeof(to.x509_username_field));
+     to.es = c->c2.es;
++#ifdef _WIN32
++    if (options->tls_client)
++    {
++        to.win_device_peer_info = win_device_peer_info(options->msg_channel, c->c2.es, &c->c2.gc);
++        to.push_peer_info_detail = max_int(to.push_peer_info_detail, 2);
++    }
++#endif
+     to.net_ctx = &c->net_ctx;
+ 
+ #ifdef ENABLE_DEBUG
+diff --git a/src/openvpn/openvpn.c b/src/openvpn/openvpn.c
+index f38660f2..dc370ed5 100644
+--- a/src/openvpn/openvpn.c
++++ b/src/openvpn/openvpn.c
+@@ -30,6 +30,7 @@
+ #include "forward.h"
+ #include "multi.h"
+ #include "win32.h"
++#include "win_device_identity_core.h"
+ #include "platform.h"
+ #include "string.h"
+ 
+@@ -206,6 +207,13 @@ openvpn_main(int argc, char *argv[])
+ 
+             /* parse command line options, and read configuration file */
+             parse_argv(&c.options, argc, argv, M_USAGE, OPT_P_DEFAULT, NULL, c.es);
++#ifdef _WIN32
++            if (c.options.show_device_info)
++            {
++                openvpn_exit(win_show_device_info(c.options.msg_channel)
++                             ? OPENVPN_EXIT_STATUS_GOOD : OPENVPN_EXIT_STATUS_ERROR);
++            }
++#endif
+ 
+ #ifdef ENABLE_PLUGIN
+             /* plugins may contribute options configuration */
+diff --git a/src/openvpn/options.c b/src/openvpn/options.c
+index 847572c2..3352b1d9 100644
+--- a/src/openvpn/options.c
++++ b/src/openvpn/options.c
+@@ -758,6 +758,7 @@ static const char usage_message[] =
+     "Windows Standalone Options:\n"
+     "\n"
+     "--show-adapters : Show all TAP-Windows adapters.\n"
++    "--show-device-info : Read Windows user, system UUID and Windows-volume disk identity.\n"
+     "--show-net      : Show " PACKAGE_NAME "'s view of routing table and net adapter list.\n"
+     "--show-valid-subnets : Show valid subnets for --dev tun emulation.\n"
+     "--allow-nonadmin [TAP-adapter] : Allow " PACKAGE_NAME " running without admin privileges\n"
+@@ -8078,6 +8079,11 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
+         }
+     }
+ #ifdef _WIN32
++    else if (streq(p[0], "show-device-info") && !p[1])
++    {
++        VERIFY_PERMISSION(OPT_P_GENERAL);
++        options->show_device_info = true;
++    }
+     else if (streq(p[0], "show-adapters") && !p[1])
+     {
+         VERIFY_PERMISSION(OPT_P_GENERAL);
+diff --git a/src/openvpn/options.h b/src/openvpn/options.h
+index 852144d1..da0db022 100644
+--- a/src/openvpn/options.h
++++ b/src/openvpn/options.h
+@@ -695,6 +695,7 @@ struct options
+     const char *exit_event_name;
+     bool exit_event_initial_state;
+     bool show_net_up;
++    bool show_device_info;
+     int route_method;
+     bool block_outside_dns;
+     enum tun_driver_type windows_driver;
+diff --git a/src/openvpn/ssl.c b/src/openvpn/ssl.c
+index 56004d9c..3dce9428 100644
+--- a/src/openvpn/ssl.c
++++ b/src/openvpn/ssl.c
+@@ -66,6 +66,9 @@
+ #include "memdbg.h"
+ #include "openvpn.h"
+ #include "env_set.h" /* peer-info spoof: env_set_get() for IV_PLAT override */
++#ifdef _WIN32
++#include "device_identity_parse.h"
++#endif
+ 
+ #ifdef MEASURE_TLS_HANDSHAKE_STATS
+ 
+@@ -1934,7 +1937,7 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
+ {
+     struct gc_arena gc = gc_new();
+     bool ret = false;
+-    struct buffer out = alloc_buf_gc(512 * 3, &gc);
++    struct buffer out = alloc_buf_gc(512 * 8, &gc);
+ 
+     if (session->opt->push_peer_info_detail > 1)
+     {
+@@ -1943,6 +1946,13 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
+ 
+         /* push platform (peer-info spoof: skip built-in value if the
+          * config overrides it via `setenv IV_PLAT ...`) */
++#ifdef _WIN32
++        if (session->opt->win_device_peer_info)
++        {
++            buf_printf(&out, "%s", session->opt->win_device_peer_info);
++        }
++        else
++#endif
+         if (!env_set_get(session->opt->es, "IV_PLAT"))
+         {
+ #if defined(TARGET_LINUX)
+@@ -2067,6 +2077,12 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
+              * via `setenv IV_PLAT/IV_USER/IV_INFO/IV_DISK ...`) */
+             for (struct env_item *e = es->list; e != NULL; e = e->next)
+             {
++#ifdef _WIN32
++                if (e->string && xy_identity_reserved_env(e->string))
++                {
++                    continue;
++                }
++#endif
+                 if (e->string)
+                 {
+                     if ((((strncmp(e->string, "UV_", 3) == 0
+diff --git a/src/openvpn/ssl_common.h b/src/openvpn/ssl_common.h
+index 9c90242f..2d3fbd81 100644
+--- a/src/openvpn/ssl_common.h
++++ b/src/openvpn/ssl_common.h
+@@ -304,6 +304,10 @@ struct tls_wrap_ctx
+  */
+ struct tls_options
+ {
++#ifdef _WIN32
++    /* Owned by the connection GC. Native identity cannot be overridden by env. */
++    const char *win_device_peer_info;
++#endif
+     /* our master TLS context from which all SSL objects are derived,
+      * this context is shared between all instances in p2pm with
+      * inherit_context_child. */
+diff --git a/src/openvpn/win_device_identity.c b/src/openvpn/win_device_identity.c
+new file mode 100644
+index 00000000..d319b824
+--- /dev/null
++++ b/src/openvpn/win_device_identity.c
+@@ -0,0 +1,303 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef WIN32_LEAN_AND_MEAN
++#define WIN32_LEAN_AND_MEAN
++#endif
++#define SECURITY_WIN32
++#include "win_device_identity.h"
++#include "openvpn-msg.h"
++#include <winioctl.h>
++#include <secext.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <wchar.h>
++
++#define XY_QUERY_TIMEOUT 3000
++#define XY_MAX_DESCRIPTOR (64 * 1024)
++#ifndef XY_EXCHANGE_TIMEOUT
++#define XY_EXCHANGE_TIMEOUT 15000
++#endif
++
++static DWORD
++fail(xy_identity_error *error, const char *stage, DWORD code)
++{
++    error->code = code ? code : ERROR_INVALID_DATA;
++    snprintf(error->stage, sizeof(error->stage), "%s", stage);
++    return error->code;
++}
++
++/* Buffers stay alive until cancellation completes, including on timeout. */
++static DWORD
++query(HANDLE device, DWORD code, void *input, DWORD input_size,
++       void *output, DWORD output_size, DWORD *received)
++{
++    OVERLAPPED ov = {0};
++    ov.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
++    if (!ov.hEvent) { return GetLastError(); }
++    DWORD error = ERROR_SUCCESS;
++    if (!DeviceIoControl(device, code, input, input_size, output, output_size, received, &ov))
++    {
++        error = GetLastError();
++        if (error == ERROR_IO_PENDING)
++        {
++            DWORD wait = WaitForSingleObject(ov.hEvent, XY_QUERY_TIMEOUT);
++            if (wait != WAIT_OBJECT_0)
++            {
++                CancelIoEx(device, &ov);
++                GetOverlappedResult(device, &ov, received, TRUE);
++                error = ERROR_TIMEOUT;
++            }
++            else if (!GetOverlappedResult(device, &ov, received, FALSE)) { error = GetLastError(); }
++            else { error = ERROR_SUCCESS; }
++        }
++    }
++    CloseHandle(ov.hEvent);
++    return error;
++}
++
++DWORD
++xy_collect_user(char user[XY_ID_USER_CAP], xy_identity_error *error)
++{
++    user[0] = '\0';
++    HANDLE token = NULL;
++    union { TOKEN_USER alignment; unsigned char bytes[1024]; } token_buf;
++    DWORD size = 0;
++    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token))
++    { return fail(error, "user-token", GetLastError()); }
++    BOOL ok = GetTokenInformation(token, TokenUser, &token_buf, sizeof(token_buf), &size);
++    DWORD code = ok ? ERROR_SUCCESS : GetLastError();
++    CloseHandle(token);
++    if (!ok) { return fail(error, "user-token", code); }
++    PSID sid = ((TOKEN_USER *)&token_buf)->User.Sid;
++    if (IsWellKnownSid(sid, WinLocalSystemSid) || IsWellKnownSid(sid, WinLocalServiceSid)
++        || IsWellKnownSid(sid, WinNetworkServiceSid))
++    { return fail(error, "unsupported-service-user", ERROR_NOT_SUPPORTED); }
++    WCHAR name[512];
++    ULONG count = (ULONG)(sizeof(name) / sizeof(name[0]));
++    if (!GetUserNameExW(NameSamCompatible, name, &count))
++    { return fail(error, "user-name", GetLastError()); }
++    char encoded[XY_ID_USER_CAP];
++    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, name, -1, encoded,
++                            sizeof(encoded), NULL, NULL))
++    { return fail(error, "user-encoding", GetLastError()); }
++    if (!xy_identity_text(encoded, sizeof(encoded), user, XY_ID_USER_CAP))
++    { return fail(error, "user-invalid", ERROR_INVALID_DATA); }
++    return ERROR_SUCCESS;
++}
++
++static DWORD
++collect_uuid(char uuid[37], xy_identity_error *error)
++{
++    /* Equivalent to the RSMB provider constant, without multi-char literals. */
++    const DWORD provider = 0x52534D42;
++    UINT size = GetSystemFirmwareTable(provider, 0, NULL, 0);
++    if (!size || size > 1024 * 1024)
++    { return fail(error, "smbios-size", ERROR_INVALID_DATA); }
++    unsigned char *buf = malloc(size);
++    if (!buf) { return fail(error, "smbios-memory", ERROR_NOT_ENOUGH_MEMORY); }
++    UINT got = GetSystemFirmwareTable(provider, 0, buf, size);
++    bool ok = got && got <= size && xy_identity_smbios(buf, got, uuid);
++    free(buf);
++    return ok ? ERROR_SUCCESS : fail(error, "smbios-uuid", ERROR_INVALID_DATA);
++}
++
++DWORD
++xy_collect_hardware(xy_hardware_identity *id, xy_identity_error *error)
++{
++    memset(id, 0, sizeof(*id));
++    memset(error, 0, sizeof(*error));
++    DWORD code = collect_uuid(id->uuid, error);
++    if (code) { return code; }
++    WCHAR windows[MAX_PATH], mount[MAX_PATH], volume[MAX_PATH], disk_path[64];
++    UINT len = GetSystemWindowsDirectoryW(windows, MAX_PATH);
++    if (!len || len >= MAX_PATH)
++    { return fail(error, "windows-directory", ERROR_BAD_PATHNAME); }
++    if (!GetVolumePathNameW(windows, mount, MAX_PATH)
++        || !GetVolumeNameForVolumeMountPointW(mount, volume, MAX_PATH))
++    { return fail(error, "windows-volume", GetLastError()); }
++    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, mount, -1,
++                            id->volume, sizeof(id->volume), NULL, NULL))
++    { return fail(error, "volume-encoding", GetLastError()); }
++    size_t vol_len = wcslen(volume);
++    if (!vol_len || volume[vol_len - 1] != L'\\')
++    { return fail(error, "volume-path", ERROR_BAD_PATHNAME); }
++    volume[vol_len - 1] = L'\0';
++    HANDLE vol = CreateFileW(volume, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
++                             OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
++    if (vol == INVALID_HANDLE_VALUE) { return fail(error, "volume-open", GetLastError()); }
++    const DWORD ext_size = (DWORD)(offsetof(VOLUME_DISK_EXTENTS, Extents) + 128 * sizeof(DISK_EXTENT));
++    VOLUME_DISK_EXTENTS *ext = calloc(1, ext_size);
++    if (!ext) { CloseHandle(vol); return fail(error, "extent-memory", ERROR_NOT_ENOUGH_MEMORY); }
++    DWORD received = 0;
++    code = query(vol, IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS, NULL, 0, ext, ext_size, &received);
++    CloseHandle(vol);
++    uint32_t numbers[128];
++    if (!code)
++    {
++        size_t start = offsetof(VOLUME_DISK_EXTENTS, Extents);
++        if (received < start || !ext->NumberOfDiskExtents || ext->NumberOfDiskExtents > 128
++            || ext->NumberOfDiskExtents > (received - start) / sizeof(DISK_EXTENT))
++        { code = ERROR_INVALID_DATA; }
++        else
++        {
++            for (DWORD i = 0; i < ext->NumberOfDiskExtents; ++i) { numbers[i] = ext->Extents[i].DiskNumber; }
++            if (!xy_identity_disk(numbers, ext->NumberOfDiskExtents, &id->disk_number))
++            { code = ERROR_NOT_SUPPORTED; }
++        }
++    }
++    free(ext);
++    if (code) { return fail(error, "volume-disk-extents", code); }
++    swprintf(disk_path, sizeof(disk_path) / sizeof(disk_path[0]), L"\\\\.\\PhysicalDrive%lu",
++             (unsigned long)id->disk_number);
++    HANDLE disk = CreateFileW(disk_path, 0, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
++                              OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL);
++    if (disk == INVALID_HANDLE_VALUE) { return fail(error, "system-disk-open", GetLastError()); }
++    STORAGE_PROPERTY_QUERY prop = {0};
++    prop.PropertyId = StorageDeviceProperty;
++    prop.QueryType = PropertyStandardQuery;
++    STORAGE_DESCRIPTOR_HEADER head = {0};
++    code = query(disk, IOCTL_STORAGE_QUERY_PROPERTY, &prop, sizeof(prop), &head, sizeof(head), &received);
++    if (!code && (received < sizeof(head) || head.Size < sizeof(STORAGE_DEVICE_DESCRIPTOR)
++                  || head.Size > XY_MAX_DESCRIPTOR)) { code = ERROR_INVALID_DATA; }
++    if (code) { CloseHandle(disk); return fail(error, "storage-descriptor-size", code); }
++    DWORD allocation = head.Size;
++    STORAGE_DEVICE_DESCRIPTOR *desc = calloc(1, allocation);
++    if (!desc) { CloseHandle(disk); return fail(error, "storage-memory", ERROR_NOT_ENOUGH_MEMORY); }
++    code = query(disk, IOCTL_STORAGE_QUERY_PROPERTY, &prop, sizeof(prop), desc, allocation, &received);
++    CloseHandle(disk);
++    if (!code && (received < sizeof(*desc) || desc->Size > received || desc->Size < sizeof(*desc)
++                  || desc->Version < sizeof(*desc))) { code = ERROR_INVALID_DATA; }
++    if (!code)
++    {
++        size_t minimum = offsetof(STORAGE_DEVICE_DESCRIPTOR, RawDeviceProperties);
++        if (!xy_identity_descriptor((unsigned char *)desc, desc->Size, desc->SerialNumberOffset,
++                                    minimum, id->serial, sizeof(id->serial))) { code = ERROR_INVALID_DATA; }
++        if (desc->ProductIdOffset >= minimum && desc->ProductIdOffset < desc->Size)
++        {
++            /* Model is diagnostic only, never an alternative device identity. */
++            xy_identity_text((char *)desc + desc->ProductIdOffset,
++                             desc->Size - desc->ProductIdOffset, id->model, sizeof(id->model));
++        }
++    }
++    free(desc);
++    return code ? fail(error, "system-disk-serial", code) : ERROR_SUCCESS;
++}
++
++bool
++xy_hardware_valid(const xy_hardware_identity *id)
++{
++    char scratch[1024];
++    if (!xy_identity_text(id->uuid, sizeof(id->uuid), scratch, sizeof(scratch)) || strlen(scratch) != 36)
++    { return false; }
++    for (size_t i = 0; i < 36; ++i)
++    {
++        char c = scratch[i];
++        if (i == 8 || i == 13 || i == 18 || i == 23)
++        { if (c != '-') { return false; } }
++        else if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')))
++        { return false; }
++    }
++    if (strcmp(id->uuid, "00000000-0000-0000-0000-000000000000") == 0
++        || _stricmp(id->uuid, "FFFFFFFF-FFFF-FFFF-FFFF-FFFFFFFFFFFF") == 0)
++    { return false; }
++    if (!memchr(id->model, 0, sizeof(id->model))) { return false; }
++    if (id->model[0] && !xy_identity_text(id->model, sizeof(id->model), scratch, sizeof(scratch)))
++    { return false; }
++    return xy_identity_serial(id->serial, sizeof(id->serial), scratch, sizeof(scratch))
++           && xy_identity_text(id->volume, sizeof(id->volume), scratch, sizeof(scratch));
++}
++
++typedef struct
++{
++    LONG refs;
++    HANDLE pipe;
++    DWORD result;
++    bool valid_response;
++    xy_identity_request_t request;
++    xy_identity_response_t response;
++} xy_exchange;
++
++static void
++release_exchange(xy_exchange *exchange)
++{
++    if (InterlockedDecrement(&exchange->refs) == 0) { free(exchange); }
++}
++
++static DWORD WINAPI
++exchange_worker(void *arg)
++{
++    xy_exchange *exchange = arg;
++    DWORD n = 0;
++    if (!WriteFile(exchange->pipe, &exchange->request, sizeof(exchange->request), &n, NULL)
++        || n != sizeof(exchange->request)
++        || !ReadFile(exchange->pipe, &exchange->response, sizeof(exchange->response), &n, NULL))
++    { exchange->result = GetLastError() ? GetLastError() : ERROR_INVALID_DATA; }
++    else if (n != sizeof(exchange->response)
++             || exchange->response.header.size != sizeof(exchange->response)
++             || exchange->response.header.type != msg_xy_device_identity_response
++             || exchange->response.header.message_id != exchange->request.header.message_id
++             || exchange->response.version != XY_ID_PROTOCOL)
++    { exchange->result = ERROR_REVISION_MISMATCH; }
++    else if (!memchr(exchange->response.error.stage, 0, sizeof(exchange->response.error.stage)))
++    { exchange->result = ERROR_INVALID_DATA; }
++    else
++    {
++        exchange->valid_response = true;
++        if (exchange->response.error.code) { exchange->result = exchange->response.error.code; }
++        else if (!xy_hardware_valid(&exchange->response.identity)) { exchange->result = ERROR_INVALID_DATA; }
++    }
++    CloseHandle(exchange->pipe);
++    release_exchange(exchange);
++    return 0;
++}
++
++DWORD
++xy_get_hardware(HANDLE pipe, xy_hardware_identity *id, xy_identity_error *error)
++{
++    if (!pipe || pipe == INVALID_HANDLE_VALUE) { return xy_collect_hardware(id, error); }
++    memset(id, 0, sizeof(*id));
++    memset(error, 0, sizeof(*error));
++    xy_exchange *exchange = calloc(1, sizeof(*exchange));
++    if (!exchange) { return fail(error, "service-memory", ERROR_NOT_ENOUGH_MEMORY); }
++    exchange->refs = 2;
++    exchange->request.header.type = msg_xy_device_identity;
++    exchange->request.header.size = sizeof(exchange->request);
++    exchange->request.header.message_id = 0x5859;
++    exchange->request.version = XY_ID_PROTOCOL;
++    if (!DuplicateHandle(GetCurrentProcess(), pipe, GetCurrentProcess(), &exchange->pipe,
++                          0, FALSE, DUPLICATE_SAME_ACCESS))
++    {
++        DWORD code = GetLastError();
++        free(exchange);
++        return fail(error, "service-handle", code);
++    }
++    HANDLE worker = CreateThread(NULL, 0, exchange_worker, exchange, 0, NULL);
++    if (!worker)
++    {
++        DWORD code = GetLastError();
++        CloseHandle(exchange->pipe);
++        free(exchange);
++        return fail(error, "service-thread", code);
++    }
++    DWORD wait = WaitForSingleObject(worker, XY_EXCHANGE_TIMEOUT);
++    DWORD code;
++    if (wait == WAIT_OBJECT_0)
++    {
++        code = exchange->result;
++        if (!code) { *id = exchange->response.identity; }
++        else if (exchange->valid_response && exchange->response.error.code == code
++                 && exchange->response.error.stage[0])
++        { *error = exchange->response.error; }
++        else { fail(error, "service-protocol", code); }
++    }
++    else
++    {
++        /* Synchronous pipe I/O runs on an owned worker, never on the main loop. */
++        CancelSynchronousIo(worker);
++        WaitForSingleObject(worker, 1000);
++        code = fail(error, "service-timeout", ERROR_TIMEOUT);
++    }
++    CloseHandle(worker);
++    release_exchange(exchange);
++    return code;
++}
+diff --git a/src/openvpn/win_device_identity.h b/src/openvpn/win_device_identity.h
+new file mode 100644
+index 00000000..982689d2
+--- /dev/null
++++ b/src/openvpn/win_device_identity.h
+@@ -0,0 +1,29 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef WIN_DEVICE_IDENTITY_H
++#define WIN_DEVICE_IDENTITY_H
++#ifdef _WIN32
++#include <windows.h>
++#include "device_identity_parse.h"
++
++#define XY_ID_PROTOCOL 1
++typedef struct
++{
++    char uuid[37];
++    char serial[XY_ID_SERIAL_CAP];
++    char model[128];
++    char volume[1024];
++    uint32_t disk_number;
++} xy_hardware_identity;
++
++typedef struct
++{
++    DWORD code;
++    char stage[64];
++} xy_identity_error;
++
++DWORD xy_collect_hardware(xy_hardware_identity *id, xy_identity_error *error);
++DWORD xy_collect_user(char user[XY_ID_USER_CAP], xy_identity_error *error);
++DWORD xy_get_hardware(HANDLE pipe, xy_hardware_identity *id, xy_identity_error *error);
++bool xy_hardware_valid(const xy_hardware_identity *id);
++#endif
++#endif
+diff --git a/src/openvpn/win_device_identity_core.c b/src/openvpn/win_device_identity_core.c
+new file mode 100644
+index 00000000..33403661
+--- /dev/null
++++ b/src/openvpn/win_device_identity_core.c
+@@ -0,0 +1,66 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++#include "syshead.h"
++#include "win_device_identity_core.h"
++#include "win_device_identity.h"
++#include "error.h"
++
++static bool
++collect(HANDLE pipe, char user[XY_ID_USER_CAP], xy_hardware_identity *id)
++{
++    xy_identity_error error = {0};
++    if (xy_collect_user(user, &error) || xy_get_hardware(pipe, id, &error))
++    {
++        msg(M_WARN, "DEVICE_IDENTITY_ERROR stage=%s win32=%lu schema=%s",
++            error.stage, error.code, XY_ID_SCHEMA);
++        return false;
++    }
++    return true;
++}
++
++const char *
++win_device_peer_info(HANDLE pipe, const struct env_set *es, struct gc_arena *gc)
++{
++    for (const struct env_item *e = es ? es->list : NULL; e; e = e->next)
++    {
++        if (e->string && xy_identity_reserved_env(e->string))
++        {
++            msg(M_FATAL, "DEVICE_IDENTITY_CONFIG_CONFLICT: remove setenv IV_PLAT/IV_USER/IV_INFO/IV_DISK/UV_DEVICE_ID_SCHEMA; Windows collects these automatically");
++        }
++    }
++    xy_hardware_identity id;
++    char user[XY_ID_USER_CAP];
++    if (!collect(pipe, user, &id))
++    {
++        msg(M_FATAL, "Cannot collect Windows device identity. Use --show-device-info in an elevated terminal to diagnose; install the matching interactive service for GUI use.");
++    }
++    struct buffer out = alloc_buf_gc(1024, gc);
++    if (!buf_printf(&out, "IV_PLAT=win\nIV_USER=%s\nIV_INFO=%s\nIV_DISK=%s\nUV_DEVICE_ID_SCHEMA=%s\n",
++                    user, id.uuid, id.serial, XY_ID_SCHEMA))
++    {
++        msg(M_FATAL, "DEVICE_IDENTITY_ERROR: peer-info exceeds maximum size");
++    }
++    msg(M_INFO, "Windows device identity collected: schema=%s source=windows-volume via=%s",
++        XY_ID_SCHEMA, pipe ? "interactive-service" : "direct");
++    return BSTR(&out);
++}
++
++bool
++win_show_device_info(HANDLE pipe)
++{
++    xy_hardware_identity id;
++    char user[XY_ID_USER_CAP];
++    if (!collect(pipe, user, &id)) { return false; }
++    msg(M_INFO | M_NOPREFIX, "schema=%s", XY_ID_SCHEMA);
++    msg(M_INFO | M_NOPREFIX, "via=%s", pipe ? "interactive-service" : "direct");
++    msg(M_INFO | M_NOPREFIX, "windows_volume=%s", id.volume);
++    msg(M_INFO | M_NOPREFIX, "disk_number=%lu", (unsigned long)id.disk_number);
++    msg(M_INFO | M_NOPREFIX, "disk_model=%s", id.model);
++    msg(M_INFO | M_NOPREFIX, "IV_PLAT=win");
++    msg(M_INFO | M_NOPREFIX, "IV_USER=%s", user);
++    msg(M_INFO | M_NOPREFIX, "IV_INFO=%s", id.uuid);
++    msg(M_INFO | M_NOPREFIX, "IV_DISK=%s", id.serial);
++    return true;
++}
+diff --git a/src/openvpn/win_device_identity_core.h b/src/openvpn/win_device_identity_core.h
+new file mode 100644
+index 00000000..f6472685
+--- /dev/null
++++ b/src/openvpn/win_device_identity_core.h
+@@ -0,0 +1,9 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef WIN_DEVICE_IDENTITY_CORE_H
++#define WIN_DEVICE_IDENTITY_CORE_H
++#ifdef _WIN32
++#include "env_set.h"
++const char *win_device_peer_info(HANDLE pipe, const struct env_set *es, struct gc_arena *gc);
++bool win_show_device_info(HANDLE pipe);
++#endif
++#endif
+diff --git a/src/openvpnserv/CMakeLists.txt b/src/openvpnserv/CMakeLists.txt
+index fc153822..a49bab5c 100644
+--- a/src/openvpnserv/CMakeLists.txt
++++ b/src/openvpnserv/CMakeLists.txt
+@@ -25,7 +25,7 @@ function(add_common_options target)
+     )
+     target_link_libraries(${target} PRIVATE
+         advapi32.lib userenv.lib iphlpapi.lib fwpuclnt.lib rpcrt4.lib
+-        shlwapi.lib netapi32.lib ws2_32.lib ntdll.lib ole32.lib pathcch.lib)
++        shlwapi.lib netapi32.lib ws2_32.lib ntdll.lib ole32.lib pathcch.lib secur32.lib)
+     if (MINGW)
+         target_compile_options(${target} PRIVATE -municode)
+         target_link_options(${target} PRIVATE -municode)
+@@ -35,6 +35,8 @@ endfunction()
+ add_common_options(openvpnserv)
+ target_sources(openvpnserv PRIVATE
+     common.c
++    ../openvpn/device_identity_parse.c
++    ../openvpn/win_device_identity.c
+     interactive.c
+     service.c service.h
+     validate.c validate.h
+diff --git a/src/openvpnserv/interactive.c b/src/openvpnserv/interactive.c
+index 7379d00d..ebf5a1ec 100644
+--- a/src/openvpnserv/interactive.c
++++ b/src/openvpnserv/interactive.c
+@@ -121,6 +121,7 @@ typedef union
+     set_mtu_message_t mtu;
+     wins_cfg_message_t wins;
+     create_adapter_message_t create_adapter;
++    xy_identity_request_t device_identity;
+ } pipe_message_t;
+ 
+ typedef struct
+@@ -3250,6 +3251,24 @@ HandleMessage(HANDLE pipe, PPROCESS_INFORMATION proc_info, DWORD bytes, DWORD co
+ 
+     switch (msg.header.type)
+     {
++        case msg_xy_device_identity:
++        {
++            xy_identity_response_t response = {0};
++            response.header.type = msg_xy_device_identity_response;
++            response.header.size = sizeof(response);
++            response.header.message_id = msg.header.message_id;
++            response.version = XY_ID_PROTOCOL;
++            response.error.code = ERROR_REVISION_MISMATCH;
++            strcpy(response.error.stage, "service-request-version");
++            if (msg.header.size == sizeof(msg.device_identity)
++                && msg.device_identity.version == XY_ID_PROTOCOL)
++            {
++                xy_collect_hardware(&response.identity, &response.error);
++            }
++            WritePipeAsync(pipe, &response, sizeof(response), count, events);
++            return;
++        }
++
+         case msg_add_address:
+         case msg_del_address:
+             if (msg.header.size == sizeof(msg.address))
+-- 
+2.47.3
+

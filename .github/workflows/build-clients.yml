@@ -27,7 +27,6 @@ concurrency:
 env:
   # ==== 升级基线（跟着上游改这三项 + patches/ 里的补丁文件）====
   OPENVPN_REF: v2.7.7
-  OPENVPN_BUILD_REF: release/2.7
   PATCH_FILE: patches/openvpn-peerinfo-spoof-2.7.7.patch
   # ==== 自定义版本：<上游>-<XY_VERSION>-<XY_DATE>，每次自定义发布 xyN +1 ====
   XY_VERSION: xy1
@@ -44,6 +43,12 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     env:
+      # Windows-only update; Linux/Tunnelblick retain their validated baseline.
+      OPENVPN_REF: v2.7.8
+      OPENVPN_BUILD_REF: ecbfe78be2b86d53ff9fff6d89d55653d7a4b0ca
+      PATCH_FILE: patches/openvpn-peerinfo-spoof-2.7.8.patch
+      WINDOWS_IDENTITY_PATCH: patches/openvpn-windows-device-identity-2.7.8.patch
+      XY_VERSION: xy2
       WIX: ${{ github.workspace }}\wix\
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg_cache,readwrite
     steps:
@@ -83,6 +88,11 @@ jobs:
           $lf = [System.IO.File]::ReadAllText($patchPath).Replace("`r`n", "`n")
           [System.IO.File]::WriteAllText($patchPath, $lf)
           git apply $patchPath
+          $identityPatch = "$env:GITHUB_WORKSPACE\cust\${{ env.WINDOWS_IDENTITY_PATCH }}"
+          $lf = [System.IO.File]::ReadAllText($identityPatch).Replace("`r`n", "`n")
+          [System.IO.File]::WriteAllText($identityPatch, $lf)
+          git apply --check $identityPatch
+          git apply $identityPatch
           if (-not (Select-String -Quiet -Pattern 'IV_DISK=' src/openvpn/ssl.c)) {
             throw "fingerprint patch not applied (IV_DISK= not found in ssl.c)"
           }
@@ -132,6 +142,19 @@ jobs:
       - name: Setup MSVC prompt
         uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756 # v1.13.0
 
+      - name: Test Windows identity parsing and service protocol
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          $src = "$env:GITHUB_WORKSPACE\openvpn-build\src\openvpn"
+          $tests = "$env:GITHUB_WORKSPACE\cust\tests\windows-device-identity"
+          Set-Location $env:RUNNER_TEMP
+          cl /nologo /std:c11 /W4 /WX /D_CRT_SECURE_NO_WARNINGS /I"$src\src\openvpn" "$tests\test_parse.c" "$src\src\openvpn\device_identity_parse.c" /Fe:identity-parse-test.exe
+          & .\identity-parse-test.exe
+          cl /nologo /std:c11 /W4 /WX /D_CRT_SECURE_NO_WARNINGS /D_WIN32_WINNT=0x0600 /DXY_EXCHANGE_TIMEOUT=100 /I"$src\src\openvpn" /I"$src\include" "$tests\test_service.c" "$src\src\openvpn\device_identity_parse.c" "$src\src\openvpn\win_device_identity.c" /Fe:identity-service-test.exe /link advapi32.lib secur32.lib
+          & .\identity-service-test.exe
+
       - name: Install WiX 3.14.1
         run: |
           Invoke-WebRequest -Uri "https://github.com/wixtoolset/wix3/releases/download/wix3141rtm/wix314-binaries.zip" -OutFile wix.zip
@@ -139,7 +162,10 @@ jobs:
 
       - name: Build MSI
         working-directory: openvpn-build/windows-msi
-        run: .\build-and-package.ps1 -arch ${{ matrix.arch }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          .\build-and-package.ps1 -arch ${{ matrix.arch }}
 
       - name: Validate MSI artifact
         shell: pwsh
@@ -158,6 +184,21 @@ jobs:
           $size = (Get-Item $expected).Length
           if ($size -lt 1MB) { throw "MSI unexpectedly small: $size bytes" }
           Get-FileHash -Algorithm SHA256 $expected | Format-List
+          "WINDOWS_MSI=$expected" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Smoke test installed Windows amd64 MSI
+        if: matrix.arch == 'amd64'
+        shell: pwsh
+        run: |
+          & "$env:GITHUB_WORKSPACE\cust\tests\windows-device-identity\smoke-installed.ps1" -Msi $env:WINDOWS_MSI -Work "$env:RUNNER_TEMP\identity-smoke"
+
+      - name: Upload Windows smoke diagnostics
+        if: always() && matrix.arch == 'amd64'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: windows-identity-smoke
+          path: ${{ runner.temp }}/identity-smoke/*.log
+          if-no-files-found: ignore
 
       - name: Upload MSI
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

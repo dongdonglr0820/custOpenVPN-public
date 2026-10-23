@@ -4,7 +4,9 @@
 保留 **peer-info 指纹上报**（`IV_USER / IV_INFO / IV_DISK / IV_PLAT`，用于测试服务端
 `clientConnecionValidator.py` 的设备绑定），版本号带 **xy** 标识与官方版本区分。
 
-> 背景：测试服务端的兼容性检查 只认带齐 IV_* 指纹的客户端，缺字段即
+Windows `xy2` 自动从 Windows 所在卷采集磁盘序列号，并通过原生模块采集设备 UUID 和当前用户；禁止配置覆盖这些字段。参见[实现说明](docs/windows-device-identity.md)和[Windows 测试步骤](docs/windows-testing.md)。
+
+> Linux/macOS 旧版背景：测试服务端的兼容性检查 只认带齐 IV_* 指纹的客户端，缺字段即
 > `INCOMPATIBLE_CLIENT` 拒绝。指纹由客户端 `setenv IV_*` 写入，上游
 > `push_peer_info()` 会丢弃它们，必须打补丁转发。
 
@@ -23,11 +25,17 @@ custOpenVPN/
 └── openvpn-build/              ┘
 ```
 
-## 版本基线（2026-09-17）
+## Windows 测试分支基线（2026-10-23）
+
+- Core：OpenVPN **2.7.8**，自定义版本 **xy2**。
+- Windows 构建：固定 `openvpn-build` 提交 `ecbfe78be2b86d53ff9fff6d89d55653d7a4b0ca`（2.7.8-I001），GUI 固定提交 `91c7fc056609d124bf29b348b23f678e35480563`，DCO 2.8.13、TAP 9.27.0。
+- 仅 Windows job 使用 2.7.8 的 peerinfo 与原生身份补丁；本次 `only=windows`，不构建 Linux/macOS。
+
+## 上次全平台基线（2026-09-17）
 
 | 组件 | 版本 | 说明 |
 |---|---|---|
-| openvpn 核心 | v2.7.7 | 2.7 线最新稳定；2.6 线停在 2.6.22（已转 Old Stable） |
+| openvpn 核心 | v2.7.7 | 上次全平台验证版本；Windows 本次已升级 |
 | openvpn-gui | v11.66.0.0 | 即 2.7.7-I001 安装器内置版本 |
 | openvpn-build | release/2.7 | MSI 构建；内置 TAP-Windows6 9.27.0、ovpn-dco-win 2.8.7 |
 | Tunnelblick | v9.0.1 | mac 定制基线；内置 openvpn-2.7.7 tarball + 补丁系列 |
@@ -109,7 +117,8 @@ custOpenVPN/
 
 ## TODO
 
-- [ ] Windows 侧 `IV_*` 值采集/写入逻辑（旧版定制 fork 源码待并入，或重做）
+- [x] Windows 原生稳定系统盘/UUID/用户采集、服务查询与诊断；[实现说明](docs/windows-device-identity.md)
+- [ ] 故障机连续 5 次重启验证（使用最终 MSI）
 - [ ] MSI 品牌名/发布者（`PRODUCT_NAME` / `PRODUCT_PUBLISHER`，现暂留 OpenVPN）
 - [x] macOS：Tunnelblick CI 接入（v9.0.1；第三方构建 + Xcode 阶段已在 CI 跑通，
       产物校验 Universal 2 + 版本戳 + 指纹补丁）
