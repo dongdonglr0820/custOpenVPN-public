@@ -30,3 +30,12 @@ macOS 外壳从 Tunnelblick 9.0.1 升至 10.0.1。Windows 已测试的 MSI 不�
 - macOS：检查两种 OpenSSL 变体的内嵌核心均为 Universal 2；分别运行 arm64 和 x86_64（Rosetta）进行真实回环 TLS 握手，核对版本与指纹字段。
 - 自动测试使用临时证书与测试字段，不连接业务 VPN；不代表 GUI 安装、真实设备采集、OTP 或业务路由已完成人工验收。
 - Windows 的实机反馈仅适用于此前交付的 Windows MSI，Linux/macOS 仍需各自验收。
+
+## 2026-10-23 构建结果
+
+- 代码提交：`c48aa2684a931975e0ec966f3a1895860c1d33d2`。
+- [CI 39921447098](https://github.com/dongdonglr0820/custOpenVPN-public/actions/runs/39921447098)：Linux amd64、Linux arm64、macOS 及最终 gate 全部成功；Windows 按 `only=unix` 跳过，继续使用已实测的原 MSI。
+- macOS 包：Tunnelblick `10.0.1 (build 6570) Unsigned`，最低 macOS `13.0`；GUI 和两个内嵌核心均验证为 `x86_64 + arm64`。
+- 内嵌核心：`2.7.8-xy2-20261023`，分别使用 OpenSSL `3.0.22` / `3.5.9`；四组回环 TLS 与指纹白名单验证全部通过。
+- Linux 两种架构均使用 `2.7.8-xy2-20261023`，最终打包文件已经核对 SHA256、ELF 架构和版本。
+- 这些结果不包含真实业务 VPN/OTP 或 Mac GUI 安装的人工验收；macOS 未做 Developer ID 签名或公证。

@@ -17,6 +17,7 @@ custOpenVPN/
 ├── patches/                    补丁（唯一事实源，CI 直接应用）
 │   ├── openvpn-peerinfo-spoof-2.7.8.patch   全平台基线
 │   ├── openvpn-windows-device-identity-2.7.8.patch  Windows 原生身份采集
+│   ├── tunnelblick-tuntap-format.patch   macOS 旧驱动日志格式兼容修正
 │   ├── openvpn-peerinfo-spoof-2.7.7.patch   历史全平台基线
 │   └── openvpn-peerinfo-spoof-2.6.14.patch  历史（办公网关 2.6.14 基线）
 ├── branding/windows/           MSI 品牌 / 版本 / 升级码
@@ -36,6 +37,7 @@ custOpenVPN/
 - macOS：Tunnelblick **10.0.1**，内嵌 OpenVPN **2.7.8-xy2**，Universal 2（Intel + Apple Silicon），最低 macOS 13。使用上游 tarball 和补丁系列，再追加本仓库的 peerinfo 与版本戳补丁。
 - 原生系统盘身份补丁仅 Windows 使用；Linux/macOS 保留现有 `setenv IV_*` 上报方式。
 - Windows `2.7.8-xy2-20261023` 完整 MSI 已获用户实机测试可用反馈；具体连续重启次数、升级/回滚、ARM64 实机覆盖未另行记录。本轮 `only=unix` 复用此包，构建 Linux/macOS；验收步骤见 [Linux/macOS 测试说明](docs/unix-testing.md)。
+- Linux/macOS [CI 39921447098](https://github.com/dongdonglr0820/custOpenVPN-public/actions/runs/39921447098) 已全部通过（构建代码 `c48aa2684a931975e0ec966f3a1895860c1d33d2`）：Linux 双架构真实连接及缺字段拒绝测试；Mac 两种 OpenSSL 变体 × 两种架构的回环 TLS。下载后的校验值、Mac ZIP 完整性、GUI/核心 Universal 2 和最低 macOS 13.0 也已核对。
 
 ## 上次全平台基线（2026-09-17）
 
@@ -87,6 +89,7 @@ custOpenVPN/
   产物 `Tunnelblick-10.0.1-openvpn-2.7.8-xy2-20261023-unsigned.zip`（+ dmg 若生成）及 SHA256。
   强制校验内嵌 OpenVPN 为 Universal 2（`x86_64 + arm64`），两种 OpenSSL 变体的两种架构均通过回环 TLS 验证版本及指纹字段。
   工具链限制为 Xcode 26.0.1–26.3，以保留 Intel 编译支持；x86_64 测试使用 Rosetta。
+  先用当前 autotools 重新生成核心构建文件，校验 TUN/TAP 实际产物；OpenSSL 通过 make jobserver 并行编译。第三方构建成功后写入上游 `do-not-clean` 标记，防止 Xcode 清空并重复编译已准备好的依赖。
 - 触发：`workflow_dispatch` / push `v*` tag；`ci/final-validation` 分支临时用于全平台验收。
 - **最终 gate**：`only=all` 要求 Windows 两架构、Linux 两架构、macOS 全部成功；`only=unix` 要求 Linux/macOS 成功且 Windows 跳过，保留已验收 Windows 包。
   workflow 配置 concurrency，同一 ref 新提交会取消被替代的旧验收 run。
@@ -100,6 +103,7 @@ custOpenVPN/
    `git format-patch -1 --stdout > patches/openvpn-peerinfo-spoof-2.7.8.patch`。
 2. 改 workflow 顶部 env：`OPENVPN_REF`、`PATCH_FILE`；`XY_VERSION` 重置为 `xy1`
    （新上游版本从 1 重新计数；发版日期由 CI 自动生成，无需手改）。
+   同步两个构建脚本的默认版本，并移植/更新 `WINDOWS_IDENTITY_PATCH`。
    其余版本相关处（MSI 产物校验、E2E 期望版本、macOS 源码目录/版本戳补丁/产物名）
    都从这几项推导，无需逐处改。另需确认两处上游配套：
    - `OPENVPN_BUILD_REF` 分支的 `windows-msi/version.m4` 已跟到新版本（MSI 包版本前缀须与
@@ -107,7 +111,7 @@ custOpenVPN/
    - macOS job 的 `TUNNELBLICK_REF` 对应的 Tunnelblick 已内置
      `third_party/sources/openvpn/openvpn-<新版本>/`（否则 CI 直接报错），必要时一起升级。
 3. Windows MSI 数字版本 / PRODUCT_CODE 由 `apply-branding.ps1` 自动处理，无需手改。
-4. 本地验证：`./openvpn/src/openvpn/openvpn --version` 应显示 `2.7.8-xy1-<日期>`；
+4. 验证新编译的交付二进制：`openvpn --version` 应显示 `<上游版本>-<XY_VERSION>-<日期>`；
    连通测试环境确认 `IV_USER/IV_INFO/IV_DISK` 上报且服务端
    `LOGGED IN` / `DEVICE_UUID MATCHED`。
 5. 推工作分支并手动 dispatch `only=all`（只补 Linux/macOS 时用 `only=unix`）→ 验证产物。合并、打 tag 与发布单独执行。
