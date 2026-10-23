@@ -2,7 +2,8 @@
 param([Parameter(Mandatory)][string]$Work, [Parameter(Mandatory)][string]$Name)
 $ErrorActionPreference = 'Stop'
 $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', 'openvpn\service',
-    [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous)
+    [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous,
+    [Security.Principal.TokenImpersonationLevel]::Impersonation)
 try {
     $pipe.Connect(10000)
     $pipe.ReadMode = [IO.Pipes.PipeTransmissionMode]::Message

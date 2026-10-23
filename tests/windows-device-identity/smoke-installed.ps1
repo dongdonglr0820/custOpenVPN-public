@@ -56,6 +56,10 @@ $server = $null
 $client = $null
 try {
     New-LocalUser -Name $testUser -Password $password -AccountNeverExpires | Out-Null
+    # GUI normally offers to create this group on first use; MSI only configures its name.
+    if (-not (Get-LocalGroup -Name 'OpenVPN Administrators' -ErrorAction SilentlyContinue)) {
+        New-LocalGroup -Name 'OpenVPN Administrators' | Out-Null
+    }
     Add-LocalGroupMember -Group 'OpenVPN Administrators' -Member $testUser
     $account = "$env:COMPUTERNAME\$testUser"
     & icacls.exe $Work /grant "${account}:(OI)(CI)M" | Out-Null
