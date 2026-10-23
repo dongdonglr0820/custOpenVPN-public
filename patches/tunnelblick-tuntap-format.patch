@@ -1,0 +1,14 @@
+The ioctl command is unsigned long; match its format with modern Clang.
+Applied with -p0 by Tunnelblick's tuntap patch loop.
+
+--- src/tuntap.cc
++++ src/tuntap.cc
+@@ -480,7 +480,7 @@
+ 	/* issue the ioctl */
+ 	err = sock_ioctl(sock, cmd, arg);
+ 	if (err)
+-		log(LOG_ERR, "tuntap: socket ioctl %d failed: %d\n", cmd, err);
++		log(LOG_ERR, "tuntap: socket ioctl %lu failed: %d\n", cmd, err);
+ 
+ 	in_ioctl = false;
+ 

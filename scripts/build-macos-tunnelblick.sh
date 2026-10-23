@@ -10,6 +10,7 @@
 #   XY_VERSION       默认 xy2
 #   XY_DATE          默认当天 UTC
 #   OUT_DIR          产物目录，默认 $PWD/out
+#   XY_BUILD_JOBS    每个 OpenSSL 架构的编译并发（默认 CPU 数；各架构仍顺序构建）
 set -euo pipefail
 
 : "${CUST_DIR:?所需变量 CUST_DIR 未设置}"
@@ -35,6 +36,8 @@ mkdir -p "$PATCH_DIR"
 # 1) 注入 peerinfo 指纹补丁（文件名 99-* 保证排在 Tunnelblick 自带补丁之后）；
 #    sed 去 CR 兜底：防止补丁在 Windows 检出被转成 CRLF（patch -p1 会打不上）
 sed 's/\r$//' "$CUST_DIR/$PATCH_FILE" > "$PATCH_DIR/99-custom-peerinfo.diff"
+cp "$CUST_DIR/patches/tunnelblick-tuntap-format.patch" \
+    third_party/sources/tuntap/tuntap-20141104/patches/99-custom-format.diff
 
 # 2) 现场生成版本戳补丁：PRODUCT_VERSION_PATCH [.7] -> [.7-xy1-YYYYMMDD]
 #    （Tunnelblick 的 built-openvpn-prepare 会对每个 patches/*.diff 做 patch -p1 -N）
@@ -57,7 +60,7 @@ rm -rf "$STAMP_TMP"
 # 注意 2：补丁循环里会用 [ "$name" != 01-... -o $XCODE_VERSION_MAJOR = 0300 ] 判断；
 #         XCODE_VERSION_MAJOR 为空时该 test 解析报错，导致【所有补丁被静默跳过】
 #         （构建照常通过但补丁没打上）。CI 里不是 Xcode 调用，必须显式导出。
-export XCODE_VERSION_MAJOR="${XCODE_VERSION_MAJOR:-1600}"
+export XCODE_VERSION_MAJOR="${XCODE_VERSION_MAJOR:-2600}"
 # 注意 3：SDK_DIR / MACOSX_DEPLOYMENT_TARGET 是 Xcode 构建阶段注入的环境变量，
 #         CI 直接跑 make 时为空 → openssl Configure 的 -isysroot/-mmacosx-version-min
 #         变成空值、编译秒失败（表现为 lipo 找不到 openssl 产物）。必须自己提供。
@@ -73,6 +76,35 @@ export TB_CAN_BUILD_ARM=1
 TB_CONFIGURE_HOST="$(uname -m)-apple-darwin"
 export TB_CONFIGURE_HOST
 export COMMAND_MODE=unix2003
+
+# Prepare the patched core and regenerate its autotools files with the installed
+# toolchain. The release tarball references aclocal-1.16, while current Homebrew
+# supplies a newer Automake; changing version.m4 otherwise triggers that missing
+# version only after all SSL variants have finished compiling.
+make -C third_party TOPDIR="$PWD/third_party" built-openvpn-prepare
+(
+    cd "third_party/build/openvpn/openvpn-$OPENVPN_VER/openvpn"
+    autoreconf -fiv
+)
+
+# Upstream's tuntap recipe can mask an inner compiler failure with a final touch.
+# Check its actual outputs before spending time on the crypto dependencies.
+make -C third_party TOPDIR="$PWD/third_party" built-tuntap
+for driver in tun tap; do
+    driver_bin="third_party/products/tuntap/$driver.kext/Contents/MacOS/$driver"
+    test -s "$driver_bin" || { echo "error: missing $driver kernel extension"; exit 1; }
+    driver_archs="$(lipo -archs "$driver_bin")"
+    [[ "$driver_archs" == *x86_64* && "$driver_archs" == *arm64e* ]] || {
+        echo "error: incomplete $driver architectures: $driver_archs"; exit 1;
+    }
+done
+
+# Only parallelize compilation within a single OpenSSL source/architecture.
+# Keep upstream's architecture loop and the legacy tuntap build sequential.
+XY_BUILD_JOBS="${XY_BUILD_JOBS:-$(sysctl -n hw.ncpu)}"
+[[ "$XY_BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || { echo 'error: invalid XY_BUILD_JOBS'; exit 1; }
+make_bin="$(command -v make)"
+make -C third_party TOPDIR="$PWD/third_party" built-allssl MAKE="$make_bin -j$XY_BUILD_JOBS"
 make -C third_party TOPDIR="$PWD/third_party"
 
 echo "=== openvpn 产物:"
