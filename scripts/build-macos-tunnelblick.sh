@@ -106,6 +106,11 @@ XY_BUILD_JOBS="${XY_BUILD_JOBS:-$(sysctl -n hw.ncpu)}"
 make -j "$XY_BUILD_JOBS" -C third_party TOPDIR="$PWD/third_party" built-allssl
 make -C third_party TOPDIR="$PWD/third_party"
 
+# Xcode's BuildThirdPartyItems.sh otherwise runs make clean, discarding this
+# completed build AND the regenerated autotools files. Use its documented
+# marker only after the complete dependency build succeeds.
+touch third_party/do-not-clean
+
 echo "=== openvpn 产物:"
 ls third_party/products/openvpn/ || true
 
