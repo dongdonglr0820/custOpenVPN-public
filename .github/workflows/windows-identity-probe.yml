@@ -1,6 +1,11 @@
 name: windows-identity-probe
 on:
   workflow_dispatch:
+  push:
+    branches: [feature/windows-stable-device-id]
+    paths:
+      - .github/workflows/windows-identity-probe.yml
+      - tests/windows-device-identity/storage-probe.c
 permissions:
   contents: read
 jobs:
