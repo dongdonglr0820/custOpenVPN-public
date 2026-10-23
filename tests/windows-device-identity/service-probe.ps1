@@ -1,5 +1,5 @@
 # Exercise the installed interactive service's actual launch/IPC path.
-param([Parameter(Mandatory)][string]$Work, [Parameter(Mandatory)][string]$Name)
+param([Parameter(Mandatory)][string]$Work, [Parameter(Mandatory)][string]$Name, [switch]$ExpectMissingSerial)
 $ErrorActionPreference = 'Stop'
 $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', 'openvpn\service',
     [IO.Pipes.PipeDirection]::InOut, [IO.Pipes.PipeOptions]::Asynchronous,
@@ -23,7 +23,10 @@ try {
                 if ($log -notmatch '(?m)^via=interactive-service\r?$') { throw 'Collector bypassed service' }
                 return
             }
-            if ($log -match 'DEVICE_IDENTITY_ERROR') { throw $log }
+            if ($log -match 'DEVICE_IDENTITY_ERROR') {
+                if ($ExpectMissingSerial -and $log -match 'stage=system-disk-serial win32=13 schema=win-system-disk-v1 via=interactive-service') { return }
+                throw $log
+            }
         }
         Start-Sleep -Milliseconds 100
     } while ((Get-Date) -lt $deadline)

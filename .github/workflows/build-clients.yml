@@ -154,6 +154,8 @@ jobs:
           & .\identity-parse-test.exe
           cl /nologo /std:c11 /W4 /WX /D_CRT_SECURE_NO_WARNINGS /D_WIN32_WINNT=0x0600 /DXY_EXCHANGE_TIMEOUT=100 /I"$src\src\openvpn" /I"$src\include" "$tests\test_service.c" "$src\src\openvpn\device_identity_parse.c" "$src\src\openvpn\win_device_identity.c" /Fe:identity-service-test.exe /link advapi32.lib secur32.lib
           & .\identity-service-test.exe
+          cl /nologo /std:c11 /W4 /WX /D_CRT_SECURE_NO_WARNINGS "$tests\storage-probe.c" /Fe:storage-probe.exe
+          cl /nologo /std:c11 /W4 /WX /D_CRT_SECURE_NO_WARNINGS /D_WIN32_WINNT=0x0600 /I"$src\src\openvpn" /I"$src\include" "$tests\tls-fixture.c" /Fe:tls-fixture.exe
 
       - name: Install WiX 3.14.1
         run: |
@@ -190,7 +192,7 @@ jobs:
         if: matrix.arch == 'amd64'
         shell: pwsh
         run: |
-          & "$env:GITHUB_WORKSPACE\cust\tests\windows-device-identity\smoke-installed.ps1" -Msi $env:WINDOWS_MSI -Work "$env:RUNNER_TEMP\identity-smoke"
+          & "$env:GITHUB_WORKSPACE\cust\tests\windows-device-identity\smoke-installed.ps1" -Msi $env:WINDOWS_MSI -Work "$env:RUNNER_TEMP\identity-smoke" -StorageProbe "$env:RUNNER_TEMP\storage-probe.exe" -TlsFixture "$env:RUNNER_TEMP\tls-fixture.exe"
 
       - name: Upload Windows smoke diagnostics
         if: always() && matrix.arch == 'amd64'

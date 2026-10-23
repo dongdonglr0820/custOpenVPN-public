@@ -1,5 +1,6 @@
 # Only run on an ephemeral CI Windows runner: installs the MSI and creates a temporary local user.
-param([Parameter(Mandatory)][string]$Msi, [Parameter(Mandatory)][string]$Work)
+param([Parameter(Mandatory)][string]$Msi, [Parameter(Mandatory)][string]$Work,
+      [Parameter(Mandatory)][string]$StorageProbe, [Parameter(Mandatory)][string]$TlsFixture)
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
 New-Item -ItemType Directory -Force $Work | Out-Null
@@ -31,29 +32,52 @@ function Assert-SameHardware($First, $Second) {
         if ($First[$key] -cne $Second[$key]) { throw "Hardware differs: $key" }
     }
 }
-foreach ($n in 1..2) { & $bin --show-device-info --log "$Work\direct-$n.log" }
-$direct = Read-Identity "$Work\direct-1.log"
-$repeat = Read-Identity "$Work\direct-2.log"
-Assert-SameHardware $direct $repeat
-if ($direct.IV_USER -ine [Security.Principal.WindowsIdentity]::GetCurrent().Name) { throw 'Wrong initiating user' }
-$uuid = (Get-CimInstance Win32_ComputerSystemProduct).UUID
-if ($direct.IV_INFO -ine $uuid) { throw 'SMBIOS UUID differs from WMI' }
 $driveLetter = [IO.Path]::GetPathRoot([Environment]::GetFolderPath('Windows')).Substring(0, 1)
 $osDisk = Get-Partition -DriveLetter $driveLetter | Get-Disk
-if (@($osDisk).Count -ne 1 -or [int]$direct.disk_number -ne $osDisk.Number) { throw 'Selected disk is not the OS disk' }
-if ($direct.IV_DISK -cne $osDisk.SerialNumber.Trim()) { throw 'Selected disk serial differs from Windows storage API' }
+if (@($osDisk).Count -ne 1) { throw 'CI requires a single OS disk' }
+$rawStorage = (& $StorageProbe) -join "`n"
+$rawStorage | Set-Content "$Work\storage.log"
+$missingSerial = [string]::IsNullOrWhiteSpace($osDisk.SerialNumber) -and $rawStorage -match 'SerialNumberOffset=0 '
+$PSNativeCommandUseErrorActionPreference = $false
+try {
+    foreach ($n in 1..2) {
+        & $bin --show-device-info --log "$Work\direct-$n.log"
+        $code = $LASTEXITCODE
+        if ($missingSerial) {
+            if ($code -ne 1 -or (Get-Content -Raw "$Work\direct-$n.log") -notmatch 'stage=system-disk-serial win32=13 schema=win-system-disk-v1 via=direct') {
+                throw 'Missing OS disk serial was not explicitly rejected'
+            }
+        } elseif ($code -ne 0) { throw "Native diagnostic failed: $code" }
+    }
+} finally { $PSNativeCommandUseErrorActionPreference = $true }
+if ($missingSerial) {
+    Write-Host 'CI OS disk has no serial: test explicit rejection; TLS uses a separate synthetic IPC fixture (not shipped).'
+    $direct = @{ IV_PLAT='win'; IV_USER=[Security.Principal.WindowsIdentity]::GetCurrent().Name;
+        IV_INFO='01234567-89AB-CDEF-0123-456789ABCDEF'; IV_DISK='CI-FIXTURE-SYSTEM-DISK' }
+} else {
+    $direct = Read-Identity "$Work\direct-1.log"
+    $repeat = Read-Identity "$Work\direct-2.log"
+    Assert-SameHardware $direct $repeat
+    if ($direct.IV_USER -ine [Security.Principal.WindowsIdentity]::GetCurrent().Name) { throw 'Wrong initiating user' }
+    if ($direct.IV_INFO -ine (Get-CimInstance Win32_ComputerSystemProduct).UUID) { throw 'SMBIOS UUID differs from WMI' }
+    if ([int]$direct.disk_number -ne $osDisk.Number) { throw 'Selected disk is not the OS disk' }
+    if ($direct.IV_DISK -cne $osDisk.SerialNumber.Trim()) { throw 'Selected disk serial differs from Windows storage API' }
+}
 
 Start-Service OpenVPNServiceInteractive
-& "$PSScriptRoot\service-probe.ps1" -Work $Work -Name service-admin
-$service = Read-Identity "$Work\service-admin.log"
-Assert-SameHardware $direct $service
-if ($direct.IV_USER -cne $service.IV_USER) { throw 'Service changed initiating user' }
+& "$PSScriptRoot\service-probe.ps1" -Work $Work -Name service-admin -ExpectMissingSerial:$missingSerial
+if (-not $missingSerial) {
+    $service = Read-Identity "$Work\service-admin.log"
+    Assert-SameHardware $direct $service
+    if ($direct.IV_USER -cne $service.IV_USER) { throw 'Service changed initiating user' }
+}
 
 # Use a fresh standard user, authorized only for OpenVPN service access (not local Administrators).
 $testUser = 'xy_identity_ci'
 $password = ConvertTo-SecureString (([guid]::NewGuid().ToString('N')) + '!Aa9') -AsPlainText -Force
 $server = $null
 $client = $null
+$launcher = $null
 try {
     New-LocalUser -Name $testUser -Password $password -AccountNeverExpires | Out-Null
     # GUI normally offers to create this group on first use; MSI only configures its name.
@@ -65,12 +89,16 @@ try {
     & icacls.exe $Work /grant "${account}:(OI)(CI)M" | Out-Null
     Copy-Item "$PSScriptRoot\service-probe.ps1" "$Work\service-probe.ps1"
     $credential = [PSCredential]::new($account, $password)
-    $probe = Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Credential $credential -WorkingDirectory $Work -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$Work\service-probe.ps1`"", '-Work', "`"$Work`"", '-Name', 'service-user') -PassThru
+    $probeArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$Work\service-probe.ps1`"", '-Work', "`"$Work`"", '-Name', 'service-user')
+    if ($missingSerial) { $probeArgs += '-ExpectMissingSerial' }
+    $probe = Start-Process "$env:SystemRoot\System32\WindowsPowerShell\v1.0\powershell.exe" -Credential $credential -WorkingDirectory $Work -ArgumentList $probeArgs -PassThru
     if (-not $probe.WaitForExit(45000)) { $probe.Kill(); throw 'Standard-user probe hung' }
     if ($probe.ExitCode -ne 0) { throw "Standard-user probe failed: $($probe.ExitCode)" }
-    $ordinary = Read-Identity "$Work\service-user.log"
-    Assert-SameHardware $direct $ordinary
-    if ($ordinary.IV_USER -ine $account) { throw 'Standard-user launch used another identity' }
+    if (-not $missingSerial) {
+        $ordinary = Read-Identity "$Work\service-user.log"
+        Assert-SameHardware $direct $ordinary
+        if ($ordinary.IV_USER -ine $account) { throw 'Standard-user launch used another identity' }
+    }
 
     # Real loopback TLS handshake using installed binaries. dev null leaves runner routes untouched.
     $openssl = 'C:\Program Files\Git\usr\bin\openssl.exe'
@@ -115,7 +143,17 @@ verb 4
 log client.log
 '@ | Set-Content -Encoding ascii client.ovpn
         $server = Start-Process $bin -WorkingDirectory $Work -ArgumentList '--config server.ovpn' -PassThru
-        $client = Start-Process $bin -WorkingDirectory $Work -ArgumentList '--config client.ovpn' -PassThru
+        if ($missingSerial) {
+            $launcher = Start-Process $TlsFixture -WorkingDirectory $Work -ArgumentList "`"$bin`"" -PassThru
+            $deadline = (Get-Date).AddSeconds(10)
+            while (-not (Test-Path fixture-client.pid)) {
+                if ($launcher.HasExited -or (Get-Date) -gt $deadline) { throw 'TLS fixture did not start installed core' }
+                Start-Sleep -Milliseconds 100
+            }
+            $client = Get-Process -Id ([int](Get-Content -Raw fixture-client.pid).Trim())
+        } else {
+            $client = Start-Process $bin -WorkingDirectory $Work -ArgumentList '--config client.ovpn' -PassThru
+        }
         $deadline = (Get-Date).AddSeconds(40)
         do {
             Start-Sleep -Milliseconds 200
@@ -131,6 +169,10 @@ log client.log
         }
         if ($serverLog -notmatch [regex]::Escape("peer info: IV_VER=$expectedVersion")) { throw 'Wire version mismatch' }
         $client.Kill(); $client.WaitForExit(); $client = $null
+        if ($launcher) {
+            if (-not $launcher.WaitForExit(5000) -or $launcher.ExitCode -ne 0) { throw 'TLS fixture transport failed' }
+            $launcher = $null
+        }
         $server.Kill(); $server.WaitForExit(); $server = $null
 
         # A profile cannot override a native identity, including before TLS starts.
@@ -138,10 +180,13 @@ log client.log
         if (-not $negative.WaitForExit(10000)) { $negative.Kill(); throw 'Conflict was not rejected promptly' }
         if ($negative.ExitCode -eq 0 -or (Get-Content -Raw conflict.log) -notmatch 'DEVICE_IDENTITY_CONFIG_CONFLICT') { throw 'Profile identity override was accepted' }
     } finally { Pop-Location }
-    'PASS: installed MSI; repeated diagnostic; WMI/storage cross-check; admin and standard-user service; TLS peer-info; profile conflict rejection' | Set-Content "$Work\result.log"
+    $hardwareResult = if ($missingSerial) {
+        'CI OS disk has no serial (independent raw descriptor verified); direct/admin-service/standard-user-service all reject it; TLS tests use synthetic hardware via a separate test-only pipe launcher. Physical hardware and reboot validation remain required.'
+    } else { 'Native hardware validated against WMI/storage API; repeated diagnostics and admin/standard-user service identities match; TLS uses actual native hardware.' }
+    "PASS: installed MSI; service protocol; TLS peer-info; profile conflict rejection. $hardwareResult" | Set-Content "$Work\result.log"
     Get-Content "$Work\result.log"
 } finally {
-    foreach ($process in @($client, $server)) { if ($process -and -not $process.HasExited) { $process.Kill() } }
+    foreach ($process in @($client, $server, $launcher)) { if ($process -and -not $process.HasExited) { $process.Kill() } }
     Remove-LocalUser -Name $testUser -ErrorAction SilentlyContinue
     # Ephemeral private keys are never part of the uploaded *.log diagnostics.
     Remove-Item "$Work\*.key" -ErrorAction SilentlyContinue
