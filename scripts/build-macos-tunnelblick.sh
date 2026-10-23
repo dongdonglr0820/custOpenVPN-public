@@ -103,8 +103,7 @@ done
 # Keep upstream's architecture loop and the legacy tuntap build sequential.
 XY_BUILD_JOBS="${XY_BUILD_JOBS:-$(sysctl -n hw.ncpu)}"
 [[ "$XY_BUILD_JOBS" =~ ^[1-9][0-9]*$ ]] || { echo 'error: invalid XY_BUILD_JOBS'; exit 1; }
-make_bin="$(command -v make)"
-make -C third_party TOPDIR="$PWD/third_party" built-allssl MAKE="$make_bin -j$XY_BUILD_JOBS"
+make -j "$XY_BUILD_JOBS" -C third_party TOPDIR="$PWD/third_party" built-allssl
 make -C third_party TOPDIR="$PWD/third_party"
 
 echo "=== openvpn 产物:"
