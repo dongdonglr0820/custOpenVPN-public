@@ -1,0 +1,21 @@
+name: windows-identity-probe
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  storage:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: ilammy/msvc-dev-cmd@0b201ec74fa43914dc39ae48a89fd1d8cb592756
+      - name: Inspect OS disk descriptor
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $true
+          Get-CimInstance Win32_ComputerSystemProduct | Select-Object UUID | Format-List
+          Get-Disk | Select-Object Number, FriendlyName, SerialNumber, IsBoot, IsSystem | Format-List
+          Get-CimInstance Win32_DiskDrive | Select-Object Index, Model, SerialNumber | Format-List
+          cl /nologo /std:c11 /W4 /WX /D_CRT_SECURE_NO_WARNINGS tests/windows-device-identity/storage-probe.c /Fe:storage-probe.exe
+          & .\storage-probe.exe
