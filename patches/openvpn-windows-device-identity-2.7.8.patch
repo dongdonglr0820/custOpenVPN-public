@@ -1,4 +1,4 @@
-From eac0df53812c3249cf6c33c25c21dc296404df34 Mon Sep 17 00:00:00 2001
+From 10ade58962f99bf0d3ea8d13452dbad1e66461cf Mon Sep 17 00:00:00 2001
 From: sunnoy <ttzhsz@163.com>
 Date: Fri, 23 Oct 2026 11:41:56 +0800
 Subject: [PATCH] windows: collect stable system-disk identity through
@@ -432,7 +432,7 @@ index 9c90242f..2d3fbd81 100644
       * inherit_context_child. */
 diff --git a/src/openvpn/win_device_identity.c b/src/openvpn/win_device_identity.c
 new file mode 100644
-index 00000000..d319b824
+index 00000000..78911d44
 --- /dev/null
 +++ b/src/openvpn/win_device_identity.c
 @@ -0,0 +1,303 @@
@@ -444,7 +444,7 @@ index 00000000..d319b824
 +#include "win_device_identity.h"
 +#include "openvpn-msg.h"
 +#include <winioctl.h>
-+#include <secext.h>
++#include <security.h>
 +#include <stdio.h>
 +#include <stdlib.h>
 +#include <string.h>
