@@ -15,7 +15,9 @@ Windows `xy2` 自动从 Windows 所在卷采集磁盘序列号，并通过原生
 ```
 custOpenVPN/
 ├── patches/                    补丁（唯一事实源，CI 直接应用）
-│   ├── openvpn-peerinfo-spoof-2.7.7.patch   当前主线（v2.7.7 基线）
+│   ├── openvpn-peerinfo-spoof-2.7.8.patch   Windows 基线
+│   ├── openvpn-windows-device-identity-2.7.8.patch  Windows 原生身份采集
+│   ├── openvpn-peerinfo-spoof-2.7.7.patch   Linux/macOS 现用基线
 │   └── openvpn-peerinfo-spoof-2.6.14.patch  历史（办公网关 2.6.14 基线）
 ├── branding/windows/           MSI 品牌 / 版本 / 升级码
 ├── scripts/                    构建脚本

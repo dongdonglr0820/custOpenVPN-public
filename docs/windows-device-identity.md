@@ -2,7 +2,7 @@
 
 状态：实现已完成，Windows 原生 CI 与故障机验证进行中。2026-10-23。
 
-代码基线：`3763440`（2026-09-24），在 `feature/windows-stable-device-id` 开发；OpenVPN 基线仍为 `v2.7.8`。此设计针对 Windows 客户端补齐自动采集，保留现有服务端 `IV_PLAT / IV_USER / IV_INFO / IV_DISK` 契约。
+代码基线：`3763440`（2026-09-24），在 `feature/windows-stable-device-id` 开发；Windows OpenVPN 基线已升级到 `v2.7.8`。此设计针对 Windows 客户端补齐自动采集，保留现有服务端 `IV_PLAT / IV_USER / IV_INFO / IV_DISK` 契约。
 
 ## 1. 要解决的问题
 
@@ -117,7 +117,7 @@ Windows 产品构建由 native collector 唯一填充四个身份字段；`.ovpn
 | 多盘故障机冷启动、重启、睡眠恢复 | 连续重启至少 5 次保持同一磁盘 ID；单次连接成功不算完成 |
 | Linux/macOS 回归 | 原补丁及既有 E2E 仍通过 |
 
-自动化覆盖解析、服务协议、MSI 安装、管理员/普通用户服务路径，以及本地 TLS 四字段上报。Windows CI 成功不替代故障机重启验证；业务服务端的 OTP 与绑定迁移须在授权测试环境另行验收。本次仅构建 Windows，Linux/macOS 保留原基线，不声称已回归。
+自动化覆盖解析、服务协议、MSI 安装、管理员/普通用户服务路径，以及本地 TLS 四字段上报。GitHub Windows 2022 的 Microsoft 虚拟系统盘没有序列号（独立检查 `Get-Disk` 与原始描述符 `SerialNumberOffset=0`）；此环境下必须断言 direct 和两种服务启动均返回明确错误，TLS 序列化另由不入安装包的 `tls-fixture.c` 提供合成硬件响应。测试日志明确标记这一区别，不能将其称为真实硬盘成功采集。若运行机提供序列号，则脚本验证真实 native 身份与 WMI、Storage API 一致并用真实值握手。Windows CI 成功不替代故障机重启验证；业务服务端的 OTP 与绑定迁移须在授权测试环境另行验收。本次仅构建 Windows，Linux/macOS 保留原基线，不声称已回归。
 
 ## 8. 依据
 

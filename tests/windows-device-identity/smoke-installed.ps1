@@ -113,6 +113,9 @@ try {
         }
         @'
 dev null
+ifconfig 10.253.0.1 10.253.0.2
+ifconfig-noexec
+route-noexec
 proto udp4
 local 127.0.0.1
 port 31194
@@ -128,6 +131,9 @@ log server.log
 '@ | Set-Content -Encoding ascii server.ovpn
         @'
 dev null
+ifconfig 10.253.0.2 10.253.0.1
+ifconfig-noexec
+route-noexec
 proto udp4
 remote 127.0.0.1 31194
 nobind
