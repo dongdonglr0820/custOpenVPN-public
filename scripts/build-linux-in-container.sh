@@ -5,8 +5,8 @@
 # 用法:  build-linux-in-container.sh <amd64|arm64>
 #
 # 约定环境变量:
-#   OPENVPN_REF   上游 tag（默认 v2.7.7）
-#   XY_VERSION    定制序号（默认 xy1）
+#   OPENVPN_REF   上游 tag（默认 v2.7.8）
+#   XY_VERSION    定制序号（默认 xy2）
 #   XY_DATE       发版日期 YYYYMMDD（默认取构建当天 UTC；CI 会显式传入保持跨平台一致）
 #   PATCH_FILE    peerinfo 补丁绝对路径（默认 /cust/patches/openvpn-peerinfo-spoof-<版本>.patch）
 #   OUT_DIR       产物目录（默认 /out）
@@ -14,8 +14,8 @@
 set -euo pipefail
 
 ARCH="${1:?usage: $0 <amd64|arm64>}"
-OPENVPN_REF="${OPENVPN_REF:-v2.7.7}"
-XY_VERSION="${XY_VERSION:-xy1}"
+OPENVPN_REF="${OPENVPN_REF:-v2.7.8}"
+XY_VERSION="${XY_VERSION:-xy2}"
 XY_DATE="${XY_DATE:-$(date -u +%Y%m%d)}"
 XY_SUFFIX="${XY_VERSION}-${XY_DATE}"
 PATCH_FILE="${PATCH_FILE:-/cust/patches/openvpn-peerinfo-spoof-${OPENVPN_REF#v}.patch}"

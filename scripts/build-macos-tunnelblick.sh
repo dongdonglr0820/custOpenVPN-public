@@ -4,23 +4,24 @@
 # 前置：CWD = Tunnelblick 源码根；已装 Xcode CLT / brew autotools / Rosetta（见 workflow 步骤）。
 # 环境变量：
 #   CUST_DIR         custOpenVPN 仓库根（必填）
-#   OPENVPN_REF      上游 tag，默认 v2.7.7（Tunnelblick 需内置同版本 tarball）
+#   OPENVPN_REF      上游 tag，默认 v2.7.8（Tunnelblick 需内置同版本 tarball）
 #   PATCH_FILE       peerinfo 补丁，相对 CUST_DIR，默认 patches/openvpn-peerinfo-spoof-<版本>.patch
-#   TUNNELBLICK_REF  Tunnelblick tag，默认 v9.0.1（仅用于产物命名）
-#   XY_VERSION       默认 xy1
+#   TUNNELBLICK_REF  Tunnelblick tag，默认 v10.0.1（仅用于产物命名）
+#   XY_VERSION       默认 xy2
 #   XY_DATE          默认当天 UTC
 #   OUT_DIR          产物目录，默认 $PWD/out
 set -euo pipefail
 
 : "${CUST_DIR:?所需变量 CUST_DIR 未设置}"
-OPENVPN_REF="${OPENVPN_REF:-v2.7.7}"
+OPENVPN_REF="${OPENVPN_REF:-v2.7.8}"
 OPENVPN_VER="${OPENVPN_REF#v}"
 PATCH_FILE="${PATCH_FILE:-patches/openvpn-peerinfo-spoof-$OPENVPN_VER.patch}"
-TUNNELBLICK_REF="${TUNNELBLICK_REF:-v9.0.1}"
-XY_VERSION="${XY_VERSION:-xy1}"
+TUNNELBLICK_REF="${TUNNELBLICK_REF:-v10.0.1}"
+XY_VERSION="${XY_VERSION:-xy2}"
 XY_DATE="${XY_DATE:-$(date -u +%Y%m%d)}"
 XY_SUFFIX="$XY_VERSION-$XY_DATE"
 OUT_DIR="${OUT_DIR:-$PWD/out}"
+[[ "$XY_DATE" =~ ^[0-9]{8}$ ]] || { echo 'error: XY_DATE must be YYYYMMDD'; exit 1; }
 mkdir -p "$OUT_DIR"
 
 OVPN_DIR="third_party/sources/openvpn/openvpn-$OPENVPN_VER"
@@ -69,7 +70,8 @@ export MACOSX_DEPLOYMENT_TARGET="${MACOSX_DEPLOYMENT_TARGET:-13.0}"
 #   - COMMAND_MODE=unix2003：官方注释"make openssl build without error"所需
 export TB_CAN_BUILD_X86_64=1
 export TB_CAN_BUILD_ARM=1
-export TB_CONFIGURE_HOST="$(uname -m)-apple-darwin"
+TB_CONFIGURE_HOST="$(uname -m)-apple-darwin"
+export TB_CONFIGURE_HOST
 export COMMAND_MODE=unix2003
 make -C third_party TOPDIR="$PWD/third_party"
 
@@ -100,7 +102,7 @@ done < <(find "$APP/Contents/Resources/openvpn" -type f -name openvpn | sort)
 
 for bin in "${OVPN_BINS[@]}"; do
     echo "=== validate embedded OpenVPN: $bin"
-    ver="$("$bin" --version | head -1)"
+    ver="$("$bin" --version | sed -n '1p')"
     echo "$ver"
     [[ "$ver" == *"$EXPECTED_OVPN"* ]] || { echo "error: custom version missing from $bin"; exit 1; }
 
@@ -113,6 +115,14 @@ for bin in "${OVPN_BINS[@]}"; do
     grep -a -q 'IV_DISK=' "$bin" || {
         echo "error: peerinfo fingerprint patch marker IV_DISK= missing from $bin"; exit 1;
     }
+
+    # Exercise both slices and both bundled OpenSSL variants over a real TLS
+    # connection. These tests configure no interfaces and use no business VPN.
+    for cpu in arm64 x86_64; do
+        EXPECTED_VERSION="$EXPECTED_OVPN" E2E_ARCH="$cpu" \
+        E2E_WORK_DIR="$PWD/e2e-peerinfo-logs/$(basename "$(dirname "$bin")")-$cpu" \
+            bash "$CUST_DIR/scripts/e2e-peerinfo-tls.sh" "$PWD/$bin"
+    done
 done
 
 # Tunnelblick 的 CFBundleShortVersionString 可能包含 "(build N) Unsigned" 等展示文字，
@@ -129,4 +139,5 @@ done
 shopt -u nullglob
 
 test -s "$OUT_DIR/$NAME.zip"
+( cd "$OUT_DIR"; shopt -s nullglob; shasum -a 256 ./*.zip ./*.dmg > SHA256SUMS.txt )
 echo "=== 产物:"; ls -lh "$OUT_DIR"

@@ -5,10 +5,11 @@ on:
   workflow_dispatch:
     inputs:
       only:
-        description: "只构建某个平台（调试用；默认 all 全平台）"
+        description: "构建平台（unix = Linux + macOS，复用已验收 Windows 包）"
         type: choice
         options:
           - all
+          - unix
           - linux
           - windows
           - macos
@@ -26,10 +27,10 @@ concurrency:
 
 env:
   # ==== 升级基线（跟着上游改这三项 + patches/ 里的补丁文件）====
-  OPENVPN_REF: v2.7.7
-  PATCH_FILE: patches/openvpn-peerinfo-spoof-2.7.7.patch
+  OPENVPN_REF: v2.7.8
+  PATCH_FILE: patches/openvpn-peerinfo-spoof-2.7.8.patch
   # ==== 自定义版本：<上游>-<XY_VERSION>-<XY_DATE>，每次自定义发布 xyN +1 ====
-  XY_VERSION: xy1
+  XY_VERSION: xy2
   # Linux 构建容器（默认全静态单文件，兼容面最大）
   LINUX_BUILD_IMAGE: ubuntu:22.04
 
@@ -43,12 +44,9 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     env:
-      # Windows-only update; Linux/Tunnelblick retain their validated baseline.
-      OPENVPN_REF: v2.7.8
+      # All platforms share the core baseline; native identity is Windows-only.
       OPENVPN_BUILD_REF: ecbfe78be2b86d53ff9fff6d89d55653d7a4b0ca
-      PATCH_FILE: patches/openvpn-peerinfo-spoof-2.7.8.patch
       WINDOWS_IDENTITY_PATCH: patches/openvpn-windows-device-identity-2.7.8.patch
-      XY_VERSION: xy2
       WIX: ${{ github.workspace }}\wix\
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg_cache,readwrite
     steps:
@@ -219,16 +217,18 @@ jobs:
 
   linux:
     name: linux-${{ matrix.arch }}
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'linux' }}
-    runs-on: ubuntu-24.04
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'unix' || inputs.only == 'linux' }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - arch: amd64
             platform: linux/amd64
+            runner: ubuntu-24.04
           - arch: arm64
             platform: linux/arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout custOpenVPN
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -237,12 +237,6 @@ jobs:
         run: |
           echo "XY_DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
           echo "XY_DATE=$XY_DATE"
-
-      # arm64 走 QEMU 模拟。若私有仓库有原生 arm64 runner（ubuntu-24.04-arm），
-      # 可把 matrix 换成原生并删掉这一步（更快）。
-      - name: Enable arm64 emulation (QEMU)
-        if: matrix.arch == 'arm64'
-        run: docker run --privileged --rm tonistiigi/binfmt --install arm64
 
       - name: Build in container (static single file)
         env:
@@ -259,13 +253,12 @@ jobs:
             bash /cust/scripts/build-linux-in-container.sh ${{ matrix.arch }}
 
       - name: End-to-end peer-info handshake
-        if: matrix.arch == 'amd64'
         shell: bash
         run: |
           set -euo pipefail
           rm -rf e2e-artifact
           mkdir -p e2e-artifact
-          tarball="$(ls out/openvpn-*-linux-amd64.tar.gz)"
+          tarball="$(ls out/openvpn-*-linux-${{ matrix.arch }}.tar.gz)"
           tar -xzf "$tarball" -C e2e-artifact
           bin="$(find e2e-artifact -type f -path '*/bin/openvpn' -print -quit)"
           test -n "$bin"
@@ -274,10 +267,10 @@ jobs:
             bash scripts/e2e-peerinfo.sh "$bin"
 
       - name: Upload E2E diagnostics
-        if: ${{ always() && matrix.arch == 'amd64' }}
+        if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: e2e-peerinfo-linux-amd64
+          name: e2e-peerinfo-linux-${{ matrix.arch }}
           path: |
             e2e-peerinfo-logs/server.log
             e2e-peerinfo-logs/client.log
@@ -297,11 +290,11 @@ jobs:
   macos-tunnelblick:
     name: macos-tunnelblick-universal2 (experimental, unsigned)
     # 验收分支 / tag 自动构建；手动触发时仍可只跑 macOS
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'macos' }}
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'unix' || inputs.only == 'macos' }}
     runs-on: macos-15
     timeout-minutes: 300
     env:
-      TUNNELBLICK_REF: v9.0.1
+      TUNNELBLICK_REF: v10.0.1
     steps:
       - name: Checkout custOpenVPN
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -321,10 +314,20 @@ jobs:
           echo "XY_DATE=$(date -u +%Y%m%d)" >> "$GITHUB_ENV"
           echo "XY_DATE=$XY_DATE"
 
-      - name: Select newest Xcode + install build prerequisites
+      - name: Select Xcode 26 with Intel support + install build prerequisites
         run: |
-          sudo xcode-select -s "$(ls -d /Applications/Xcode*.app | sort -V | tail -1)/Contents/Developer"
-          sudo softwareupdate --install-rosetta --agree-to-license || true
+          # Tunnelblick requires Rosetta/LZO and an SDK that still builds x86_64.
+          # Upstream documents Xcode 26.3 as the last supported Intel toolchain.
+          selected=""
+          for version in 26.3 26.2 26.1.1 26.1 26.0.1; do
+            candidate="/Applications/Xcode_$version.app/Contents/Developer"
+            if [ -d "$candidate" ]; then selected="$candidate"; break; fi
+          done
+          test -n "$selected" || { echo 'No supported Xcode 26 installation'; exit 1; }
+          sudo xcode-select -s "$selected"
+          if [ "$(uname -m)" = arm64 ]; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
           brew install autoconf automake libtool
           xcodebuild -version
 
@@ -345,6 +348,14 @@ jobs:
           ls third_party/sources/openvpn
           bash "$CUST_DIR/scripts/build-macos-tunnelblick.sh"
 
+      - name: Upload macOS TLS diagnostics
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: e2e-peerinfo-macos
+          path: tunnelblick/e2e-peerinfo-logs/**/*.log
+          if-no-files-found: warn
+
       - name: Upload macOS artifacts
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -353,8 +364,8 @@ jobs:
           if-no-files-found: error
 
   final-gate:
-    name: final-all-platforms-gate
-    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.only == 'all') }}
+    name: final-selected-platforms-gate
+    if: ${{ always() && (github.event_name != 'workflow_dispatch' || inputs.only == 'all' || inputs.only == 'unix') }}
     needs: [windows-msi, linux, macos-tunnelblick]
     runs-on: ubuntu-24.04
     steps:
@@ -363,9 +374,14 @@ jobs:
           WINDOWS_RESULT: ${{ needs.windows-msi.result }}
           LINUX_RESULT: ${{ needs.linux.result }}
           MACOS_RESULT: ${{ needs.macos-tunnelblick.result }}
+          ONLY: ${{ inputs.only }}
         run: |
           echo "windows=$WINDOWS_RESULT linux=$LINUX_RESULT macos=$MACOS_RESULT"
-          test "$WINDOWS_RESULT" = success
+          if [ "$ONLY" = unix ]; then
+            test "$WINDOWS_RESULT" = skipped
+          else
+            test "$WINDOWS_RESULT" = success
+          fi
           test "$LINUX_RESULT" = success
           test "$MACOS_RESULT" = success
-          echo "ALL PLATFORMS PASSED"
+          echo "ALL SELECTED PLATFORMS PASSED"
