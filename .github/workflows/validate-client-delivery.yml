@@ -1,0 +1,113 @@
+name: validate-client-delivery
+
+on:
+  push:
+    branches: ["feature/all-clients-system-disk-xy3"]
+  workflow_dispatch:
+    inputs:
+      source_run:
+        description: "Existing full-platform build containing the exact delivery packages"
+        default: "41000425235"
+        required: true
+        type: string
+      expected_version:
+        description: "Expected packaged OpenVPN version"
+        default: "2.7.8-xy3-20261030"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: validate-delivery-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  SOURCE_RUN: ${{ inputs.source_run || '41000425235' }}
+  EXPECTED_OVPN: ${{ inputs.expected_version || '2.7.8-xy3-20261030' }}
+
+jobs:
+  source-build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+      - name: Require matching product inputs and successful Windows/Linux builds
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ "$SOURCE_RUN" =~ ^[0-9]+$ ]]
+          [[ "$EXPECTED_OVPN" =~ ^[0-9]+\.[0-9]+\.[0-9]+-xy[0-9]+-[0-9]{8}$ ]]
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN" > source-run.json
+          gh api "repos/$GITHUB_REPOSITORY/actions/runs/$SOURCE_RUN/jobs?per_page=100" > source-jobs.json
+          python3 - <<'PY'
+          import json, pathlib, re, subprocess
+          run = json.loads(pathlib.Path('source-run.json').read_text())
+          sha = run['head_sha']
+          assert re.fullmatch('[a-f0-9]{40}', sha)
+          subprocess.run(['git', 'diff', '--exit-code', sha, 'HEAD', '--',
+                          'patches/', 'branding/', 'scripts/build-linux-in-container.sh'], check=True)
+          before = subprocess.check_output(['git', 'show', sha + ':scripts/build-macos-tunnelblick.sh'], text=True)
+          current = pathlib.Path('scripts/build-macos-tunnelblick.sh').read_text()
+          assert current.startswith(before.split('OVPN_BINS=()')[0]), 'Mac compilation/packaging inputs changed'
+          before = subprocess.check_output(['git', 'show', sha + ':.github/workflows/build-clients.yml'], text=True)
+          current = pathlib.Path('.github/workflows/build-clients.yml').read_text()
+          for key in ['OPENVPN_REF', 'XY_VERSION', 'OPENVPN_BUILD_REF', 'TUNNELBLICK_REF']:
+              pattern = r'^\s*' + key + r':\s*(\S+)'
+              assert re.search(pattern, before, re.M).group(1) == re.search(pattern, current, re.M).group(1), key
+          for start, end in [('  windows-msi:', '  linux:'), ('  linux:', '  macos-tunnelblick:')]:
+              assert before.split(start, 1)[1].split(end, 1)[0] == current.split(start, 1)[1].split(end, 1)[0]
+          jobs = {x['name']: x for x in json.loads(pathlib.Path('source-jobs.json').read_text())['jobs']}
+          for name in ['windows-msi-amd64', 'windows-msi-arm64', 'linux-amd64', 'linux-arm64']:
+              assert jobs[name]['conclusion'] == 'success', (name, jobs[name]['conclusion'])
+              print('PASS:', name, 'original build and tests')
+          print('PASS: exact product patches, branding, platform refs and packaging are unchanged; only validation is updated')
+          PY
+
+  macos-delivery:
+    needs: source-build
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Select supported Xcode and enable both CPU slices
+        run: |
+          set -euo pipefail
+          selected=""
+          for version in 26.3 26.2 26.1.1 26.1 26.0.1; do
+            candidate="/Applications/Xcode_$version.app/Contents/Developer"
+            if [ -d "$candidate" ]; then selected="$candidate"; break; fi
+          done
+          test -n "$selected"
+          sudo xcode-select -s "$selected"
+          if [ "$(uname -m)" = arm64 ]; then
+            sudo softwareupdate --install-rosetta --agree-to-license
+          fi
+      - name: Verify exact packaged app and run four TLS cases
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CUST_DIR: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          gh run download "$SOURCE_RUN" --repo "$GITHUB_REPOSITORY" --name macos-tunnelblick --dir dist
+          (cd dist && shasum -a 256 -c SHA256SUMS.txt)
+          archives=(dist/*.zip)
+          test "${#archives[@]}" = 1
+          ditto -x -k "${archives[0]}" extracted
+          bash scripts/validate-macos-tunnelblick.sh "$PWD/extracted/Tunnelblick.app"
+      - name: Upload delivery verification evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: macos-delivery-validation
+          path: e2e-peerinfo-logs/**/*.log
+          if-no-files-found: warn
+
+  final-delivery-gate:
+    needs: [source-build, macos-delivery]
+    runs-on: ubuntu-24.04
+    steps:
+      - run: echo "All five architecture targets validated; exact source packages retained."

@@ -6,7 +6,10 @@
 #include <IOKit/IOKitLib.h>
 #include <IOKit/storage/IOMedia.h>
 #include <stdbool.h>
+#include <errno.h>
+#include <stdarg.h>
 #include <string.h>
+#include <unistd.h>
 
 static CFTypeRef
 fixture_property(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allocator,
@@ -24,7 +27,7 @@ fixture_string(CFStringRef value, char *buffer, CFIndex size, CFStringEncoding e
 {
     /* The VM has a virtual backing device. Only this non-shipping provider
      * substitutes its kind; APFS/root-to-whole-disk selection stays native. */
-    if (CFEqual(value, CFSTR("Virtual")))
+    if (size == 64 && encoding == kCFStringEncodingUTF8 && CFEqual(value, CFSTR("Virtual")))
     {
         const char physical[] = "Physical";
         if (size < (CFIndex)sizeof(physical)) { return false; }
@@ -32,6 +35,32 @@ fixture_string(CFStringRef value, char *buffer, CFIndex size, CFStringEncoding e
         return true;
     }
     return CFStringGetCString(value, buffer, size, encoding);
+}
+
+static int
+fixture_execl(const char *path, const char *first, ...)
+{
+    char *argv[16];
+    size_t count = 0;
+    const char *next = first;
+    va_list args;
+    va_start(args, first);
+    while (next && count < 15)
+    {
+        argv[count++] = (char *)next;
+        next = va_arg(args, const char *);
+    }
+    va_end(args);
+    if (next) { errno = E2BIG; return -1; }
+    argv[count] = NULL;
+    if (!strcmp(path, "/usr/sbin/diskutil"))
+    {
+        /* CI VMs can have SIP disabled. Never inject this provider into the
+         * real diskutil child; only the temporary OpenVPN copy is under test. */
+        char *clean_env[] = { "PATH=/usr/bin:/bin:/usr/sbin:/sbin", "LC_ALL=C", NULL };
+        return execve(path, argv, clean_env);
+    }
+    return execv(path, argv);
 }
 
 #define XY_INTERPOSE(replacement_function, original_function) \
@@ -42,3 +71,4 @@ fixture_string(CFStringRef value, char *buffer, CFIndex size, CFStringEncoding e
 
 XY_INTERPOSE(fixture_property, IORegistryEntryCreateCFProperty);
 XY_INTERPOSE(fixture_string, CFStringGetCString);
+XY_INTERPOSE(fixture_execl, execl);

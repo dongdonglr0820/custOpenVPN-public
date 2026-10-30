@@ -7,6 +7,8 @@ BIN="${1:?usage: $0 <path-to-openvpn>}"
 BIN="$(cd "$(dirname "$BIN")" && pwd)/$(basename "$BIN")"
 : "${EXPECTED_VERSION:?EXPECTED_VERSION is required}"
 PORT="${E2E_PORT:-31195}"
+E2E_ARCH="${E2E_ARCH:-}"
+E2E_DEVICE_FIXTURE_LIB="${E2E_DEVICE_FIXTURE_LIB:-}"
 RUN=("$BIN")
 if [[ -n "${E2E_ARCH:-}" ]]; then
     [[ "$(uname -s)" = Darwin ]] || { echo 'E2E_ARCH requires macOS'; exit 1; }
