@@ -30,7 +30,7 @@ custOpenVPN/
 └── tunnelblick/                ┘ macOS 上游源码克隆
 ```
 
-## 当前构建目标（2026-10-30）
+## 当前全平台基线（2026-10-30）
 
 - Core：上游最新稳定版 OpenVPN **2.7.8**，自定义版本 **xy3**。
 - Windows：固定正式发布的 `OpenVPN-2.7.8-I002` 对应 `openvpn-build` 提交 `420fa8333400114efa2bb272cc81c4c5b09c156f`；GUI 为发行包内的 `11.66.0.0`（`ee41d6d4738904bbf6a3d64271400e324c8e2e41`），DCO **2.8.14**、TAP 9.27.0。不跟随尚未发布的 release 分支 HEAD。
@@ -38,7 +38,7 @@ custOpenVPN/
 - macOS：Tunnelblick **10.0.2**，内嵌 OpenVPN **2.7.8-xy3**，Universal 2，最低 macOS 13。系统卷（含 APFS snapshot）→ APFS Physical Store → whole disk → 该盘 IORegistry serial。
 - 三端都只选择系统所在盘；多盘系统卷、无有效序列号或不支持的根文件系统明确失败，不取数据盘、USB 盘或第一块盘兜底。Linux 当前支持可由根设备号追踪的块设备文件系统，overlay、网络根和使用匿名设备号的 Btrfs 明确不支持。
 - Linux/macOS 自动生成 `IV_DISK`，禁止 `.ovpn` 的 `setenv IV_DISK` 或 `UV_SYSTEM_DISK_SCHEMA` 覆盖；`IV_USER / IV_INFO / IV_PLAT` 保留原采集来源。Windows 四字段的原生采集契约不变。
-- 新版诊断和迁移说明见 [系统盘设计](docs/unix-system-disk.md)与[Linux/macOS 测试说明](docs/unix-testing.md)。本轮全平台构建及验证结果待 CI 回填，不沿用 xy2 验收结论。
+- 新版诊断和迁移说明见 [系统盘设计](docs/unix-system-disk.md)与[Linux/macOS 测试说明](docs/unix-testing.md)。本轮 [交付验证 41003113670](https://github.com/dongdonglr0820/custOpenVPN-public/actions/runs/41003113670) 已全绿。安装包来自构建 `41000425235`、产品源码 `2bfa727`；Windows/Linux 四架构原构建与测试成功，Mac 使用同一未修改安装包通过四组 TLS 复验，并在真实 Intel Mac 上通过两种核心的原生采集与 TLS。完整边界见 [xy3 验证记录](docs/xy3-build-validation.md)。
 
 ### 已验收的上一版（2026-10-23，xy2）
 

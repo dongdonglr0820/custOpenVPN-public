@@ -13,4 +13,4 @@
 
 Linux 全静态构建对域名解析有 glibc 限制，使用域名作为 remote 时需验证，必要时用动态构建。macOS 当前没有 Developer ID 签名/公证，不要让官方自动更新覆盖定制核心。
 
-全平台 CI 与交付包校验结果待本轮构建回填。自动验证不代表业务 VPN、Mac GUI 安装或多次真实重启已经验收。
+本轮交付验证、包校验和真实 Intel Mac 核心测试已通过，见 [xy3 验证记录](xy3-build-validation.md)。自动验证不代表业务 VPN、Mac GUI 安装或多次真实重启已经验收。

@@ -1,5 +1,7 @@
 # Windows 设备信息采集与稳定磁盘绑定设计
 
+2026-10-30：xy3 使用 Windows 2.7.8-I002 / DCO 2.8.14，沿用本文原生采集实现；下文保留 xy2 设计与历史验收背景。最新结果见 [xy3 验证记录](xy3-build-validation.md)，Linux/macOS 新增实现见 [Unix 系统盘设计](unix-system-disk.md)。
+
 状态：实现与 Windows CI 已完成；待故障机多次重启验证。2026-10-23。
 
 验收构建：[39900900006](https://github.com/dongdonglr0820/custOpenVPN-public/actions/runs/39900900006)，代码提交 `4c8ccd8635ab1cd98b35e7d5476273b328653db7`。amd64 安装/服务/协议测试通过，ARM64 编译通过；虚拟机序列号缺失与合成 TLS 测试的边界见第 7 节。
