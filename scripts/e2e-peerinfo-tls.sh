@@ -56,6 +56,7 @@ else
 fi
 NATIVE_DISK="$(sed -n 's/^IV_DISK=//p' <<<"$native_info")"
 [[ -n "$NATIVE_DISK" && "$NATIVE_DISK" != *$'\n'* ]] || { echo 'Invalid native disk diagnostic'; exit 1; }
+SERVER_DISK="$(printf '%s' "$NATIVE_DISK" | LC_ALL=C tr ' $(`' '____')"
 if [[ -n "${E2E_DEVICE_FIXTURE_LIB:-}" ]]; then
     [[ "$NATIVE_DISK" = CI-SYNTHETIC-MAC-SYSTEM-DISK ]] || { echo 'Test provider was not loaded'; exit 1; }
 fi
@@ -101,7 +102,7 @@ grep -q 'Initialization Sequence Completed' client.log
 
 # Exact values also reject duplicate fields (sed would yield multiple lines).
 for pair in "IV_VER=$EXPECTED_VERSION" IV_USER=tls_test_user IV_INFO=tls_test_uuid \
-    "IV_DISK=$NATIVE_DISK" IV_PLAT=tls_test_platform; do
+    "IV_DISK=$SERVER_DISK" IV_PLAT=tls_test_platform; do
     key="${pair%%=*}"
     actual="$(sed -n "s/.*peer info: $key=//p" server.log)"
     [[ "$actual" = "${pair#*=}" ]] || {

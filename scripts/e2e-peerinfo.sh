@@ -135,6 +135,9 @@ native_info="$("$BIN" --show-system-disk)"
 printf '%s\n' "$native_info" > "$WORK/system-disk.log"
 IV_DISK_VALUE="$(sed -n 's/^IV_DISK=//p' <<<"$native_info")"
 [[ -n "$IV_DISK_VALUE" && "$IV_DISK_VALUE" != *$'\n'* ]] || { echo 'Invalid native disk diagnostic'; exit 1; }
+# OpenVPN's upstream validate_peer_info_line() maps whitespace and these shell
+# metacharacters to underscores before exporting/logging the received field.
+IV_DISK_SERVER_VALUE="$(printf '%s' "$IV_DISK_VALUE" | LC_ALL=C tr ' $(`' '____')"
 IV_PLAT_VALUE="e2e_custom_platform"
 IV_BLOCKED_VALUE="must_not_cross_peerinfo"
 
@@ -180,7 +183,7 @@ assert_exact() {
 
 assert_exact IV_USER "$IV_USER_VALUE"
 assert_exact IV_INFO "$IV_INFO_VALUE"
-assert_exact IV_DISK "$IV_DISK_VALUE"
+assert_exact IV_DISK "$IV_DISK_SERVER_VALUE"
 assert_exact IV_PLAT "$IV_PLAT_VALUE"
 assert_exact IV_VER "$EXPECTED_VERSION"
 
@@ -191,7 +194,7 @@ if grep -q '^IV_NOT_ALLOWED=' "$CAPTURE"; then
 fi
 
 # Protocol-level evidence from server parsing, independent of the hook snapshot.
-for expected in     "IV_USER=$IV_USER_VALUE"     "IV_INFO=$IV_INFO_VALUE"     "IV_DISK=$IV_DISK_VALUE"     "IV_PLAT=$IV_PLAT_VALUE"     "IV_VER=$EXPECTED_VERSION"; do
+for expected in     "IV_USER=$IV_USER_VALUE"     "IV_INFO=$IV_INFO_VALUE"     "IV_DISK=$IV_DISK_SERVER_VALUE"     "IV_PLAT=$IV_PLAT_VALUE"     "IV_VER=$EXPECTED_VERSION"; do
     grep -F "peer info: $expected" "$WORK/server.log" >/dev/null || {
         echo "ERROR: server log does not show peer info: $expected"
         cat "$WORK/server.log"

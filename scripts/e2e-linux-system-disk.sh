@@ -24,6 +24,12 @@ if [[ "${1:-}" = --inside ]]; then
     printf 'CI-SYNTHETIC-SYSTEM-DISK-9\n' > "$fixture/devices/block/nvme9n1/serial"
     "$bin" --show-system-disk > "$work/serial-restored.log"
     grep -Fx 'IV_DISK=CI-SYNTHETIC-SYSTEM-DISK-9' "$work/serial-restored.log"
+    # The collected ID stays raw; the upstream server sanitizes internal spaces.
+    printf 'CI SYSTEM DISK 9\n' > "$fixture/devices/block/nvme9n1/serial"
+    EXPECTED_VERSION="$expected" E2E_WORK_DIR="$work/fixture-spaces" \
+        bash "$repo/scripts/e2e-peerinfo.sh" "$bin"
+    grep -Fx 'IV_DISK=CI SYSTEM DISK 9' "$work/fixture-spaces/system-disk.log"
+    grep -Fx 'IV_DISK=CI_SYSTEM_DISK_9' "$work/fixture-spaces/client-connect-valid.env"
     echo 'PASS: final artifact selects only the system disk, rejects missing ID and recovers after fixture restoration'
     exit
 fi
