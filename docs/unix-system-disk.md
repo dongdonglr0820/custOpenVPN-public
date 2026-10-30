@@ -34,6 +34,8 @@ Linux 单元测试以真实临时 sysfs 树验证系统盘不在第一位、编�
 
 Linux 的最终交付二进制在独立 mount namespace 中读取合成的多盘 sysfs，真实握手必须只上报指定系统盘 serial；缺 serial 必须失败，恢复后重新通过。若 CI runner 提供原生 serial，也运行原生采集与握手；没有时记录明确拒绝，合成拓扑证据单独标记。
 
-macOS 的两种架构分别运行 APFS snapshot、非零盘号、HFS、多盘和异常 plist 测试；最终应用的两种 OpenSSL 核心 × 两种 CPU slice 运行本地 TLS，比较原生诊断与服务端实际收到的唯一 `IV_DISK` 并验证配置覆盖被拒绝。
+macOS 的两种架构分别运行 APFS snapshot、非零盘号、HFS、多盘、异常 plist 和嵌入 NUL serial 测试。最终应用的两种 OpenSSL 核心 × 两种 CPU slice 先做未修改二进制的原生诊断；宿主提供有效 serial 时直接执行本地 TLS。
+
+CI 虚拟存储没有有效 serial 或为 Virtual 时，原生拒绝必须匹配明确的设备错误；随后仅在临时核心副本中加载独立 IOKit 测试 provider，做四组真实 TLS、唯一 `IV_DISK`、字段白名单和配置覆盖拒绝测试。provider 和测试副本不会出包；测试前后检查原交付核心的 SHA256 不变，并拒绝产品内出现测试 serial 标记。此路径只证明 TLS 序列化，不能声称 CI 成功采集了真实硬盘。另在真实 Intel Mac 上独立核对 APFS 系统盘 serial；业务 VPN/OTP 和真实重启仍需单独验收。
 
 本地 TLS 不代表业务 VPN/OTP、GUI 安装、真实多盘插拔或多次冷启动已验收。Windows 的既有 CI 及实机结果也不能外推到新包或 Unix 平台。

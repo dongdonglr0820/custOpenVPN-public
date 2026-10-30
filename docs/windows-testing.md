@@ -1,6 +1,6 @@
-# Windows xy2 系统盘标识测试
+# Windows xy3 系统盘标识测试
 
-本测试分支基于 OpenVPN 2.7.8。普通 Intel/AMD 64 位电脑安装 `amd64.msi`；仅 Windows ARM 电脑安装 `arm64.msi`。MSI 未做发布者签名。
+本轮基于 OpenVPN 2.7.8-I002，定制版 xy3，DCO 2.8.14；系统盘采集逻辑沿用 xy2。普通 Intel/AMD 64 位电脑安装 `amd64.msi`；仅 Windows ARM 电脑安装 `arm64.msi`。MSI 未做发布者签名。
 
 1. 备份原 `.ovpn` 配置，记录旧客户端版本和服务端当前设备绑定。退出 OpenVPN GUI，并断开连接。
 2. 安装完整 MSI，确保 core 和 **OpenVPN Interactive Service** 都更新。不要只替换 `openvpn.exe`。若原版使用另一套安装产品标识，先备份配置并卸载旧版，再安装测试包；不要并存使用同一路径的两个安装产品。

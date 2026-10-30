@@ -94,7 +94,7 @@ Linux/macOS [CI 39921447098](https://github.com/dongdonglr0820/custOpenVPN-publi
   `third_party/sources/openvpn/openvpn-2.7.8/patches/` → `make -C third_party` →
   `xcodebuild -alltargets Release`（工程内置的 BuildAppsAndDmgs.sh 自动打包/adhoc 签名）→
   产物 `Tunnelblick-10.0.2-openvpn-2.7.8-xy3-<日期>-unsigned.zip`（+ dmg 若生成）及 SHA256。
-  强制校验内嵌 OpenVPN 为 Universal 2（`x86_64 + arm64`），两种 OpenSSL 变体的两种架构均通过回环 TLS 验证版本及指纹字段。
+  强制校验内嵌 OpenVPN 为 Universal 2（`x86_64 + arm64`），两种 OpenSSL 变体的两种架构均运行回环 TLS 验证版本及指纹字段。CI 虚拟存储缺 ID 时，先验证原生拒绝，再用不入包的 IOKit provider 和临时核心副本验证 TLS；真实硬件采集与这种合成测试分别记录。
   工具链限制为 Xcode 26.0.1–26.3，以保留 Intel 编译支持；x86_64 测试使用 Rosetta。
   先用当前 autotools 重新生成核心构建文件，校验 TUN/TAP 实际产物；OpenSSL 通过 make jobserver 并行编译。第三方构建成功后写入上游 `do-not-clean` 标记，防止 Xcode 清空并重复编译已准备好的依赖。
 - 触发：`workflow_dispatch` / push `v*` tag；`ci/final-validation` 分支临时用于全平台验收。

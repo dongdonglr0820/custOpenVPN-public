@@ -1,32 +1,3 @@
-From be6957efd514e0b6c53007df2b80b5fb17719f31 Mon Sep 17 00:00:00 2001
-From: sunnoy <ttzhsz@163.com>
-Date: Fri, 30 Oct 2026 11:30:15 +0800
-Subject: [PATCH] unix: derive IV_DISK only from the system volume backing disk
-
----
- CMakeLists.txt                  |   8 +
- configure.ac                    |   1 +
- src/openvpn/Makefile.am         |   3 +
- src/openvpn/init.c              |   8 +
- src/openvpn/openvpn.c           |   8 +
- src/openvpn/options.c           |  10 ++
- src/openvpn/options.h           |   3 +
- src/openvpn/ssl.c               |  15 +-
- src/openvpn/ssl_common.h        |   4 +
- src/openvpn/system_disk.c       |  41 ++++++
- src/openvpn/system_disk.h       |  24 +++
- src/openvpn/system_disk_core.c  |  53 +++++++
- src/openvpn/system_disk_core.h  |   9 ++
- src/openvpn/system_disk_linux.c | 143 ++++++++++++++++++
- src/openvpn/system_disk_macos.c | 254 ++++++++++++++++++++++++++++++++
- 15 files changed, 583 insertions(+), 1 deletion(-)
- create mode 100644 src/openvpn/system_disk.c
- create mode 100644 src/openvpn/system_disk.h
- create mode 100644 src/openvpn/system_disk_core.c
- create mode 100644 src/openvpn/system_disk_core.h
- create mode 100644 src/openvpn/system_disk_linux.c
- create mode 100644 src/openvpn/system_disk_macos.c
-
 diff --git a/CMakeLists.txt b/CMakeLists.txt
 index c92d9ea6..095a1209 100644
 --- a/CMakeLists.txt
@@ -521,10 +492,10 @@ index 00000000..6ef3bbf6
 +#endif
 diff --git a/src/openvpn/system_disk_macos.c b/src/openvpn/system_disk_macos.c
 new file mode 100644
-index 00000000..5bd1f1b1
+index 00000000..57d2b0d6
 --- /dev/null
 +++ b/src/openvpn/system_disk_macos.c
-@@ -0,0 +1,254 @@
+@@ -0,0 +1,262 @@
 +/* SPDX-License-Identifier: GPL-2.0-only */
 +#ifdef __APPLE__
 +#include "system_disk.h"
@@ -565,6 +536,17 @@ index 00000000..5bd1f1b1
 +    CFTypeRef value = CFDictionaryGetValue(dict, key);
 +    return value && CFGetTypeID(value) == CFStringGetTypeID()
 +           && CFStringGetCString(value, out, (CFIndex)size, kCFStringEncodingUTF8);
++}
++
++bool
++xy_macos_disk_serial(CFTypeRef value, char serial[XY_DISK_SERIAL_CAP])
++{
++    char raw[1024];
++    return value && CFGetTypeID(value) == CFStringGetTypeID()
++           && CFStringGetCString(value, raw, sizeof(raw), kCFStringEncodingUTF8)
++           /* ASCII serials cannot contain hidden NULs or truncated suffixes. */
++           && CFStringGetLength(value) == (CFIndex)strlen(raw)
++           && xy_disk_serial(raw, serial);
 +}
 +
 +/* Pure selection logic, also used by the APFS/snapshot/Fusion fixture tests. */
@@ -726,10 +708,7 @@ index 00000000..5bd1f1b1
 +        }
 +        if (value)
 +        {
-+            char raw[1024];
-+            ok = CFGetTypeID(value) == CFStringGetTypeID()
-+                 && CFStringGetCString(value, raw, sizeof(raw), kCFStringEncodingUTF8)
-+                 && xy_disk_serial(raw, serial);
++            ok = xy_macos_disk_serial(value, serial);
 +            CFRelease(value);
 +            break; /* Invalid serials never cause a switch to another ancestor's ID. */
 +        }
@@ -779,6 +758,3 @@ index 00000000..5bd1f1b1
 +    return true;
 +}
 +#endif
--- 
-2.47.3
-

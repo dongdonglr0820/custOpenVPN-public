@@ -5,6 +5,7 @@
 #include <string.h>
 
 extern bool xy_macos_store_from_info(CFDictionaryRef root, char store[128], char error[128]);
+extern bool xy_macos_disk_serial(CFTypeRef value, char serial[256]);
 #define CHECK(x) do { if (!(x)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #x); return 1; } } while (0)
 
 static CFDictionaryRef
@@ -46,6 +47,13 @@ main(void)
     CHECK(!xy_disk_serial("disk\nIV_DISK=other", serial));
     CHECK(!xy_disk_serial("00000000", serial));
     CHECK(!xy_disk_serial("unknown", serial));
+    CHECK(xy_macos_disk_serial(CFSTR("  MAC_OS_DISK.123  "), serial));
+    CHECK(!xy_macos_disk_serial(kCFBooleanTrue, serial));
+    const UniChar nul_serial[] = { 'A', 'B', 0, 'C' };
+    CFStringRef hidden_nul = CFStringCreateWithCharacters(NULL, nul_serial, 4);
+    CHECK(hidden_nul != NULL);
+    CHECK(!xy_macos_disk_serial(hidden_nul, serial));
+    CFRelease(hidden_nul);
     puts("PASS: APFS snapshots, nonzero system disk, HFS, Fusion rejection, missing store, invalid names and serials");
     return 0;
 }

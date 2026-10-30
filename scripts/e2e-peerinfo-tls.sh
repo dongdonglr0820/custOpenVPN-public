@@ -12,6 +12,14 @@ if [[ -n "${E2E_ARCH:-}" ]]; then
     [[ "$(uname -s)" = Darwin ]] || { echo 'E2E_ARCH requires macOS'; exit 1; }
     RUN=(/usr/bin/arch "-$E2E_ARCH" "$BIN")
 fi
+if [[ -n "${E2E_DEVICE_FIXTURE_LIB:-}" ]]; then
+    [[ "$(uname -s)" = Darwin && -f "$E2E_DEVICE_FIXTURE_LIB" ]] || { echo 'Invalid test-only device provider'; exit 1; }
+    RUN=(/usr/bin/env "DYLD_INSERT_LIBRARIES=$E2E_DEVICE_FIXTURE_LIB" "$BIN")
+    if [[ -n "${E2E_ARCH:-}" ]]; then
+        RUN=(/usr/bin/arch "-$E2E_ARCH" "${RUN[@]}")
+    fi
+    echo 'TEST ONLY: synthetic IOKit storage provider; this core copy and dylib are not packaged'
+fi
 
 mkdir -p "${E2E_WORK_DIR:-${TMPDIR:-/tmp}}"
 WORK="$(mktemp -d "${E2E_WORK_DIR:-${TMPDIR:-/tmp}}/tls.XXXXXX")"
@@ -40,10 +48,17 @@ version="$("${RUN[@]}" --version | sed -n '1p')"
     echo "ERROR: unexpected version: $version"; exit 1;
 }
 echo "$version"
-native_info="$("${RUN[@]}" --show-system-disk)"
-printf '%s\n' "$native_info" > "$WORK/system-disk.log"
+if native_info="$("${RUN[@]}" --show-system-disk 2>&1)"; then
+    printf '%s\n' "$native_info" > "$WORK/system-disk.log"
+else
+    printf '%s\n' "$native_info" | tee "$WORK/system-disk.log"
+    exit 1
+fi
 NATIVE_DISK="$(sed -n 's/^IV_DISK=//p' <<<"$native_info")"
 [[ -n "$NATIVE_DISK" && "$NATIVE_DISK" != *$'\n'* ]] || { echo 'Invalid native disk diagnostic'; exit 1; }
+if [[ -n "${E2E_DEVICE_FIXTURE_LIB:-}" ]]; then
+    [[ "$NATIVE_DISK" = CI-SYNTHETIC-MAC-SYSTEM-DISK ]] || { echo 'Test provider was not loaded'; exit 1; }
+fi
 cd "$WORK"
 umask 077
 openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt \

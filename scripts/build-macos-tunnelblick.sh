@@ -139,6 +139,23 @@ APP="tunnelblick/build/Release/Tunnelblick.app"
 [ -d "$APP" ] || { echo "error: Tunnelblick.app 未生成（检查 xcodebuild 日志）"; exit 1; }
 
 EXPECTED_OVPN="$OPENVPN_VER-$XY_SUFFIX"
+# Tunnelblick 的 CFBundleShortVersionString 可能包含 "(build N) Unsigned" 等展示文字，
+# 产物文件名固定使用基线版本，避免空格和 runner 构建描述污染文件名。
+NAME="Tunnelblick-${TUNNELBLICK_REF#v}-openvpn-$EXPECTED_OVPN-unsigned"
+ditto -c -k --keepParent "$APP" "$OUT_DIR/$NAME.zip"
+
+# 实际 DMG 位于 build/Release/，原脚本匹配 build/*.dmg 会漏掉。
+shopt -s nullglob
+for f in tunnelblick/build/Release/*.dmg tunnelblick/build/Release/Signed/*.dmg; do
+    base="$(basename "$f")"
+    cp "$f" "$OUT_DIR/${base%.dmg}-openvpn-$EXPECTED_OVPN.dmg"
+done
+shopt -u nullglob
+
+test -s "$OUT_DIR/$NAME.zip"
+( cd "$OUT_DIR"; shopt -s nullglob; shasum -a 256 ./*.zip ./*.dmg > SHA256SUMS.txt )
+echo "=== 产物:"; ls -lh "$OUT_DIR"
+
 OVPN_BINS=()
 while IFS= read -r bin; do
     OVPN_BINS+=("$bin")
@@ -161,28 +178,39 @@ for bin in "${OVPN_BINS[@]}"; do
         echo "error: peerinfo fingerprint patch marker IV_DISK= missing from $bin"; exit 1;
     }
 
-    # Exercise both slices and both bundled OpenSSL variants over a real TLS
-    # connection. These tests configure no interfaces and use no business VPN.
+    if grep -a -q 'CI-SYNTHETIC-MAC-SYSTEM-DISK' "$bin"; then
+        echo 'ERROR: test-only provider marker entered the shipped core'; exit 1
+    fi
+    original_hash="$(shasum -a 256 "$bin")"
+
+    # Validate the unmodified delivered core first. Hosted macOS VMs do not
+    # necessarily expose a real disk serial: rejection is required evidence.
     for cpu in arm64 x86_64; do
-        EXPECTED_VERSION="$EXPECTED_OVPN" E2E_ARCH="$cpu" \
-        E2E_WORK_DIR="$PWD/e2e-peerinfo-logs/$(basename "$(dirname "$bin")")-$cpu" \
-            bash "$CUST_DIR/scripts/e2e-peerinfo-tls.sh" "$PWD/$bin"
+        case_dir="$PWD/e2e-peerinfo-logs/$(basename "$(dirname "$bin")")-$cpu"
+        mkdir -p "$case_dir"
+        if /usr/bin/arch "-$cpu" "$PWD/$bin" --show-system-disk > "$case_dir/native-system-disk.log" 2>&1; then
+            EXPECTED_VERSION="$EXPECTED_OVPN" E2E_ARCH="$cpu" \
+            E2E_WORK_DIR="$case_dir" \
+                bash "$CUST_DIR/scripts/e2e-peerinfo-tls.sh" "$PWD/$bin"
+        else
+            cat "$case_dir/native-system-disk.log"
+            grep -Eq '^SYSTEM_DISK_ERROR: stage=mac-(system-disk-not-physical|system-disk-serial-unavailable-or-invalid)' \
+                "$case_dir/native-system-disk.log" || { echo 'Unexpected native collection failure'; exit 1; }
+            echo 'CI virtual storage rejected. TLS serialization uses a separate, non-shipping IOKit provider.'
+            fixture_dir="$(mktemp -d)"
+            clang -arch "$cpu" -std=c11 -Wall -Wextra -Werror -dynamiclib \
+                "$CUST_DIR/tests/unix-system-disk/macos-tls-fixture.c" \
+                -framework CoreFoundation -framework IOKit -o "$fixture_dir/provider.dylib"
+            cp "$bin" "$fixture_dir/openvpn-test-only"
+            # Remove runtime library validation on the test copy alone. The
+            # packaged app and its original core are never modified.
+            codesign --force --sign - "$fixture_dir/openvpn-test-only"
+            codesign --force --sign - "$fixture_dir/provider.dylib"
+            EXPECTED_VERSION="$EXPECTED_OVPN" E2E_ARCH="$cpu" \
+            E2E_DEVICE_FIXTURE_LIB="$fixture_dir/provider.dylib" E2E_WORK_DIR="$case_dir" \
+                bash "$CUST_DIR/scripts/e2e-peerinfo-tls.sh" "$fixture_dir/openvpn-test-only"
+            rm -rf "$fixture_dir"
+        fi
     done
+    [[ "$(shasum -a 256 "$bin")" = "$original_hash" ]] || { echo 'ERROR: validation modified shipped core'; exit 1; }
 done
-
-# Tunnelblick 的 CFBundleShortVersionString 可能包含 "(build N) Unsigned" 等展示文字，
-# 产物文件名固定使用基线版本，避免空格和 runner 构建描述污染文件名。
-NAME="Tunnelblick-${TUNNELBLICK_REF#v}-openvpn-$EXPECTED_OVPN-unsigned"
-ditto -c -k --keepParent "$APP" "$OUT_DIR/$NAME.zip"
-
-# 实际 DMG 位于 build/Release/，原脚本匹配 build/*.dmg 会漏掉。
-shopt -s nullglob
-for f in tunnelblick/build/Release/*.dmg tunnelblick/build/Release/Signed/*.dmg; do
-    base="$(basename "$f")"
-    cp "$f" "$OUT_DIR/${base%.dmg}-openvpn-$EXPECTED_OVPN.dmg"
-done
-shopt -u nullglob
-
-test -s "$OUT_DIR/$NAME.zip"
-( cd "$OUT_DIR"; shopt -s nullglob; shasum -a 256 ./*.zip ./*.dmg > SHA256SUMS.txt )
-echo "=== 产物:"; ls -lh "$OUT_DIR"
