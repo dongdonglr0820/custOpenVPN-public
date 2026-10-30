@@ -131,14 +131,17 @@ grep -q "Initialization Sequence Completed" "$WORK/server.log" || {
 
 IV_USER_VALUE="e2e_user_$(date -u +%s)"
 IV_INFO_VALUE="e2e_info_linux_amd64"
-IV_DISK_VALUE="e2e_disk_0123456789abcdef"
+native_info="$("$BIN" --show-system-disk)"
+printf '%s\n' "$native_info" > "$WORK/system-disk.log"
+IV_DISK_VALUE="$(sed -n 's/^IV_DISK=//p' <<<"$native_info")"
+[[ -n "$IV_DISK_VALUE" && "$IV_DISK_VALUE" != *$'\n'* ]] || { echo 'Invalid native disk diagnostic'; exit 1; }
 IV_PLAT_VALUE="e2e_custom_platform"
 IV_BLOCKED_VALUE="must_not_cross_peerinfo"
 
 # --client implies --pull, which sets push_peer_info_detail=2 in OpenVPN.
 # That is important: the custom fields must work without requiring an
 # additional --push-peer-info option.
-"$BIN"     --client     --dev null     --ifconfig-noexec     --nobind     --remote 127.0.0.1 "$PORT"     --proto udp4     --ca "$WORK/ca.crt"     --cert "$WORK/client.crt"     --key "$WORK/client.key"     --remote-cert-tls server     --connect-retry 1 1     --connect-retry-max 2     --server-poll-timeout 5     --setenv IV_USER "$IV_USER_VALUE"     --setenv IV_INFO "$IV_INFO_VALUE"     --setenv IV_DISK "$IV_DISK_VALUE"     --setenv IV_PLAT "$IV_PLAT_VALUE"     --setenv IV_NOT_ALLOWED "$IV_BLOCKED_VALUE"     --verb 4     --log "$WORK/client.log"     --writepid "$WORK/client.pid" &
+"$BIN"     --client     --dev null     --ifconfig-noexec     --nobind     --remote 127.0.0.1 "$PORT"     --proto udp4     --ca "$WORK/ca.crt"     --cert "$WORK/client.crt"     --key "$WORK/client.key"     --remote-cert-tls server     --connect-retry 1 1     --connect-retry-max 2     --server-poll-timeout 5     --setenv IV_USER "$IV_USER_VALUE"     --setenv IV_INFO "$IV_INFO_VALUE"     --setenv IV_PLAT "$IV_PLAT_VALUE"     --setenv IV_NOT_ALLOWED "$IV_BLOCKED_VALUE"     --verb 4     --log "$WORK/client.log"     --writepid "$WORK/client.pid" &
 CLIENT_PID=$!
 
 for _ in $(seq 1 30); do
@@ -215,66 +218,23 @@ wait "$CLIENT_PID" 2>/dev/null || true
 CLIENT_PID=""
 rm -f "$WORK/client.pid" "$CAPTURE"
 
-# Negative case: omit IV_DISK. The same server-side gate must reject it.
-"$BIN" \
-    --client \
-    --dev null \
-    --ifconfig-noexec \
-    --nobind \
-    --remote 127.0.0.1 "$PORT" \
-    --proto udp4 \
-    --ca "$WORK/ca.crt" \
-    --cert "$WORK/client.crt" \
-    --key "$WORK/client.key" \
-    --remote-cert-tls server \
-    --connect-retry 1 1 \
-    --connect-retry-max 1 \
-    --server-poll-timeout 5 \
-    --setenv IV_USER "negative_missing_disk_user" \
-    --setenv IV_INFO "negative_missing_disk_info" \
-    --setenv IV_PLAT "$IV_PLAT_VALUE" \
-    --verb 4 \
-    --log "$WORK/client-missing-disk.log" \
-    --writepid "$WORK/client-missing-disk.pid" &
+# The disk is mandatory and native: configured disk values must fail before TLS.
+"$BIN" --client --dev null --ifconfig-noexec --nobind \
+    --remote 127.0.0.1 "$PORT" --proto udp4 --ca "$WORK/ca.crt" \
+    --cert "$WORK/client.crt" --key "$WORK/client.key" --remote-cert-tls server \
+    --setenv IV_DISK forged_data_disk --log "$WORK/client-conflict.log" &
 CLIENT_PID=$!
-
-for _ in $(seq 1 20); do
-    [[ -s "$CAPTURE" ]] && break
+for _ in $(seq 1 10); do
     kill -0 "$CLIENT_PID" 2>/dev/null || break
     sleep 1
 done
-
-[[ -s "$CAPTURE" ]] || {
-    echo "ERROR: missing-IV_DISK case never reached server validator"
-    cat "$WORK/client-missing-disk.log" || true
-    cat "$WORK/server.log" || true
-    exit 1
-}
-cp "$CAPTURE" "$WORK/client-connect-missing-disk.env"
-
-grep -Fx 'MISSING_IV_DISK=1' "$CAPTURE" >/dev/null || {
-    echo "ERROR: negative test did not prove IV_DISK was missing"
-    cat "$CAPTURE"
-    exit 1
-}
-if grep -q '^IV_DISK=' "$CAPTURE"; then
-    echo "ERROR: negative test unexpectedly delivered IV_DISK"
-    cat "$CAPTURE"
-    exit 1
+if kill -0 "$CLIENT_PID" 2>/dev/null; then
+    echo 'ERROR: identity override was not rejected before TLS'; exit 1
 fi
-
-# Give OpenVPN a moment to process the client-connect rejection.
-sleep 2
-if grep -q "Initialization Sequence Completed" "$WORK/client-missing-disk.log"; then
-    echo "ERROR: client without IV_DISK was accepted"
-    cat "$WORK/client-missing-disk.log"
-    exit 1
-fi
-
-kill "$CLIENT_PID" 2>/dev/null || true
-wait "$CLIENT_PID" 2>/dev/null || true
+if wait "$CLIENT_PID"; then echo 'ERROR: identity override returned success'; exit 1; fi
 CLIENT_PID=""
+grep -q 'SYSTEM_DISK_CONFIG_CONFLICT' "$WORK/client-conflict.log"
 
-echo "PASS: complete device fingerprint was accepted end-to-end"
-echo "PASS: missing IV_DISK was rejected by the server-side compatibility gate"
+echo "PASS: native system-disk fingerprint was accepted end-to-end"
+echo "PASS: configured disk override was rejected before TLS"
 echo "PASS: non-whitelisted IV_NOT_ALLOWED was not forwarded"

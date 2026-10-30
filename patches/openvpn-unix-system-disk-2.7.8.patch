@@ -1,0 +1,784 @@
+From be6957efd514e0b6c53007df2b80b5fb17719f31 Mon Sep 17 00:00:00 2001
+From: sunnoy <ttzhsz@163.com>
+Date: Fri, 30 Oct 2026 11:30:15 +0800
+Subject: [PATCH] unix: derive IV_DISK only from the system volume backing disk
+
+---
+ CMakeLists.txt                  |   8 +
+ configure.ac                    |   1 +
+ src/openvpn/Makefile.am         |   3 +
+ src/openvpn/init.c              |   8 +
+ src/openvpn/openvpn.c           |   8 +
+ src/openvpn/options.c           |  10 ++
+ src/openvpn/options.h           |   3 +
+ src/openvpn/ssl.c               |  15 +-
+ src/openvpn/ssl_common.h        |   4 +
+ src/openvpn/system_disk.c       |  41 ++++++
+ src/openvpn/system_disk.h       |  24 +++
+ src/openvpn/system_disk_core.c  |  53 +++++++
+ src/openvpn/system_disk_core.h  |   9 ++
+ src/openvpn/system_disk_linux.c | 143 ++++++++++++++++++
+ src/openvpn/system_disk_macos.c | 254 ++++++++++++++++++++++++++++++++
+ 15 files changed, 583 insertions(+), 1 deletion(-)
+ create mode 100644 src/openvpn/system_disk.c
+ create mode 100644 src/openvpn/system_disk.h
+ create mode 100644 src/openvpn/system_disk_core.c
+ create mode 100644 src/openvpn/system_disk_core.h
+ create mode 100644 src/openvpn/system_disk_linux.c
+ create mode 100644 src/openvpn/system_disk_macos.c
+
+diff --git a/CMakeLists.txt b/CMakeLists.txt
+index c92d9ea6..095a1209 100644
+--- a/CMakeLists.txt
++++ b/CMakeLists.txt
+@@ -622,6 +622,14 @@ set(SOURCE_FILES
+     )
+ 
+ add_executable(openvpn ${SOURCE_FILES})
++if(NOT WIN32)
++    target_sources(openvpn PRIVATE
++        src/openvpn/system_disk.c src/openvpn/system_disk_linux.c
++        src/openvpn/system_disk_macos.c src/openvpn/system_disk_core.c)
++    if(APPLE)
++        target_link_libraries(openvpn PRIVATE "-framework CoreFoundation" "-framework IOKit")
++    endif()
++endif()
+ 
+ add_library_deps(openvpn)
+ 
+diff --git a/configure.ac b/configure.ac
+index 7753f45e..7c98d387 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -343,6 +343,7 @@ case "$host" in
+ 		AC_DEFINE([TARGET_DARWIN], [1], [Are we running on Mac OS X?])
+ 		AC_DEFINE_UNQUOTED([TARGET_PREFIX], ["M"], [Target prefix])
+ 		AC_SUBST([DNS_UPDOWN_TYPE], ["macos"])
++		LIBS="${LIBS} -framework CoreFoundation -framework IOKit"
+ 		have_tap_header="yes"
+ 		ac_cv_type_struct_in_pktinfo=no
+ 		;;
+diff --git a/src/openvpn/Makefile.am b/src/openvpn/Makefile.am
+index 3c567aa7..9be7576e 100644
+--- a/src/openvpn/Makefile.am
++++ b/src/openvpn/Makefile.am
+@@ -42,6 +42,9 @@ endif
+ sbin_PROGRAMS = openvpn
+ 
+ openvpn_SOURCES = \
++	system_disk.c system_disk.h \
++	system_disk_linux.c system_disk_macos.c \
++	system_disk_core.c system_disk_core.h \
+ 	argv.c argv.h \
+ 	auth_token.c auth_token.h \
+ 	base64.c base64.h \
+diff --git a/src/openvpn/init.c b/src/openvpn/init.c
+index 2f09b0f7..a9e50445 100644
+--- a/src/openvpn/init.c
++++ b/src/openvpn/init.c
+@@ -31,6 +31,7 @@
+ #endif
+ 
+ #include "win32.h"
++#include "system_disk_core.h"
+ #include "init.h"
+ #include "run_command.h"
+ #include "sig.h"
+@@ -3363,6 +3364,13 @@ do_init_crypto_tls(struct context *c, const unsigned int flags)
+     to.verify_hash_no_ca = options->verify_hash_no_ca;
+     memcpy(to.x509_username_field, options->x509_username_field, sizeof(to.x509_username_field));
+     to.es = c->c2.es;
++#if defined(TARGET_LINUX) || defined(TARGET_DARWIN)
++    if (options->tls_client)
++    {
++        to.system_disk_peer_info = unix_system_disk_peer_info(c->c2.es, &c->c2.gc);
++        to.push_peer_info_detail = max_int(to.push_peer_info_detail, 2);
++    }
++#endif
+     to.net_ctx = &c->net_ctx;
+ 
+ #ifdef ENABLE_DEBUG
+diff --git a/src/openvpn/openvpn.c b/src/openvpn/openvpn.c
+index f38660f2..218eaf39 100644
+--- a/src/openvpn/openvpn.c
++++ b/src/openvpn/openvpn.c
+@@ -30,6 +30,7 @@
+ #include "forward.h"
+ #include "multi.h"
+ #include "win32.h"
++#include "system_disk_core.h"
+ #include "platform.h"
+ #include "string.h"
+ 
+@@ -206,6 +207,13 @@ openvpn_main(int argc, char *argv[])
+ 
+             /* parse command line options, and read configuration file */
+             parse_argv(&c.options, argc, argv, M_USAGE, OPT_P_DEFAULT, NULL, c.es);
++#if defined(TARGET_LINUX) || defined(TARGET_DARWIN)
++            if (c.options.show_system_disk)
++            {
++                openvpn_exit(unix_show_system_disk()
++                             ? OPENVPN_EXIT_STATUS_GOOD : OPENVPN_EXIT_STATUS_ERROR);
++            }
++#endif
+ 
+ #ifdef ENABLE_PLUGIN
+             /* plugins may contribute options configuration */
+diff --git a/src/openvpn/options.c b/src/openvpn/options.c
+index 847572c2..e4f02fd2 100644
+--- a/src/openvpn/options.c
++++ b/src/openvpn/options.c
+@@ -125,6 +125,9 @@ static const char usage_message[] =
+     "General Options:\n"
+     "--config file   : Read configuration options from file.\n"
+     "--help          : Show options.\n"
++#if defined(TARGET_LINUX) || defined(TARGET_DARWIN)
++    "--show-system-disk : Read only the system-volume disk identity without connecting.\n"
++#endif
+     "--version       : Show copyright and version information.\n"
+     "\n"
+     "Tunnel Options:\n"
+@@ -8077,6 +8080,13 @@ add_option(struct options *options, char *p[], bool is_inline, const char *file,
+ #endif
+         }
+     }
++#if defined(TARGET_LINUX) || defined(TARGET_DARWIN)
++    else if (streq(p[0], "show-system-disk") && !p[1])
++    {
++        VERIFY_PERMISSION(OPT_P_GENERAL);
++        options->show_system_disk = true;
++    }
++#endif
+ #ifdef _WIN32
+     else if (streq(p[0], "show-adapters") && !p[1])
+     {
+diff --git a/src/openvpn/options.h b/src/openvpn/options.h
+index 852144d1..01d951a2 100644
+--- a/src/openvpn/options.h
++++ b/src/openvpn/options.h
+@@ -682,6 +682,9 @@ struct options
+     bool single_session;
+ 
+     bool push_peer_info;
++#if defined(TARGET_LINUX) || defined(TARGET_DARWIN)
++    bool show_system_disk;
++#endif
+ 
+     bool tls_exit;
+ 
+diff --git a/src/openvpn/ssl.c b/src/openvpn/ssl.c
+index 56004d9c..5cacd407 100644
+--- a/src/openvpn/ssl.c
++++ b/src/openvpn/ssl.c
+@@ -1934,12 +1934,18 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
+ {
+     struct gc_arena gc = gc_new();
+     bool ret = false;
+-    struct buffer out = alloc_buf_gc(512 * 3, &gc);
++    struct buffer out = alloc_buf_gc(512 * 4, &gc);
+ 
+     if (session->opt->push_peer_info_detail > 1)
+     {
+         /* push version */
+         buf_printf(&out, "IV_VER=%s\n", PACKAGE_VERSION);
++#if defined(TARGET_LINUX) || defined(TARGET_DARWIN)
++        if (session->opt->system_disk_peer_info)
++        {
++            buf_printf(&out, "%s", session->opt->system_disk_peer_info);
++        }
++#endif
+ 
+         /* push platform (peer-info spoof: skip built-in value if the
+          * config overrides it via `setenv IV_PLAT ...`) */
+@@ -2069,6 +2075,13 @@ push_peer_info(struct buffer *buf, struct tls_session *session)
+             {
+                 if (e->string)
+                 {
++#if defined(TARGET_LINUX) || defined(TARGET_DARWIN)
++                    if (!strncmp(e->string, "IV_DISK=", sizeof("IV_DISK=") - 1)
++                        || !strncmp(e->string, "UV_SYSTEM_DISK_SCHEMA=", sizeof("UV_SYSTEM_DISK_SCHEMA=") - 1))
++                    {
++                        continue;
++                    }
++#endif
+                     if ((((strncmp(e->string, "UV_", 3) == 0
+                            || strncmp(e->string, "IV_PLAT_VER=", sizeof("IV_PLAT_VER=") - 1) == 0)
+                           && session->opt->push_peer_info_detail > 2)
+diff --git a/src/openvpn/ssl_common.h b/src/openvpn/ssl_common.h
+index 9c90242f..43d40629 100644
+--- a/src/openvpn/ssl_common.h
++++ b/src/openvpn/ssl_common.h
+@@ -304,6 +304,10 @@ struct tls_wrap_ctx
+  */
+ struct tls_options
+ {
++#if defined(TARGET_LINUX) || defined(TARGET_DARWIN)
++    /* A connection-owned native snapshot; never taken from profile/env fields. */
++    const char *system_disk_peer_info;
++#endif
+     /* our master TLS context from which all SSL objects are derived,
+      * this context is shared between all instances in p2pm with
+      * inherit_context_child. */
+diff --git a/src/openvpn/system_disk.c b/src/openvpn/system_disk.c
+new file mode 100644
+index 00000000..b494682c
+--- /dev/null
++++ b/src/openvpn/system_disk.c
+@@ -0,0 +1,41 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#include "system_disk.h"
++#include <ctype.h>
++#include <stdio.h>
++#include <string.h>
++
++bool
++xy_disk_fail(char error[128], const char *stage)
++{
++    snprintf(error, 128, "%s", stage);
++    return false;
++}
++
++bool
++xy_disk_serial(const char *value, char out[XY_DISK_SERIAL_CAP])
++{
++    size_t len = strlen(value);
++    /* sysfs and IORegistry sometimes pad serials. Never strip internal bytes. */
++    while (len && value[0] == ' ') { ++value; --len; }
++    while (len && value[len - 1] == ' ') { --len; }
++    if (!len || len >= XY_DISK_SERIAL_CAP) { return false; }
++    bool meaningful = false;
++    for (size_t i = 0; i < len; ++i)
++    {
++        unsigned char c = (unsigned char)value[i];
++        if (c < 32 || c > 126) { return false; }
++        if (isalnum(c) && c != '0' && c != 'f' && c != 'F') { meaningful = true; }
++    }
++    if (!meaningful) { return false; }
++    memcpy(out, value, len);
++    out[len] = '\0';
++    const char *invalid[] = { "unknown", "none", "null", "default string",
++                              "to be filled by o.e.m.", "not specified" };
++    char lower[XY_DISK_SERIAL_CAP];
++    for (size_t i = 0; i <= len; ++i) { lower[i] = (char)tolower((unsigned char)out[i]); }
++    for (size_t i = 0; i < sizeof(invalid) / sizeof(invalid[0]); ++i)
++    {
++        if (!strcmp(lower, invalid[i])) { return false; }
++    }
++    return true;
++}
+diff --git a/src/openvpn/system_disk.h b/src/openvpn/system_disk.h
+new file mode 100644
+index 00000000..3e48ba94
+--- /dev/null
++++ b/src/openvpn/system_disk.h
+@@ -0,0 +1,24 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef XY_SYSTEM_DISK_H
++#define XY_SYSTEM_DISK_H
++#include <stdbool.h>
++#include <stddef.h>
++
++#define XY_DISK_SERIAL_CAP 256
++struct xy_system_disk
++{
++    char serial[XY_DISK_SERIAL_CAP];
++    char device[128];
++};
++
++bool xy_disk_serial(const char *value, char out[XY_DISK_SERIAL_CAP]);
++bool xy_disk_fail(char error[128], const char *stage);
++bool xy_collect_system_disk(struct xy_system_disk *disk, char error[128]);
++#ifdef __linux__
++/* The production entry point always supplies /sys and stat("/").st_dev.
++ * This separate traversal entry point permits filesystem-fixture tests. */
++bool xy_linux_disk_from_sysfs(const char *sysroot, unsigned int major_number,
++                              unsigned int minor_number, struct xy_system_disk *disk,
++                              char error[128]);
++#endif
++#endif
+diff --git a/src/openvpn/system_disk_core.c b/src/openvpn/system_disk_core.c
+new file mode 100644
+index 00000000..58f15a5f
+--- /dev/null
++++ b/src/openvpn/system_disk_core.c
+@@ -0,0 +1,53 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifdef HAVE_CONFIG_H
++#include "config.h"
++#endif
++#include "syshead.h"
++#if defined(TARGET_LINUX) || defined(TARGET_DARWIN)
++#include "system_disk.h"
++#include "system_disk_core.h"
++#include "error.h"
++#if defined(TARGET_DARWIN)
++#define XY_DISK_SCHEMA "mac-system-disk-v1"
++#else
++#define XY_DISK_SCHEMA "linux-system-disk-v1"
++#endif
++
++const char *
++unix_system_disk_peer_info(const struct env_set *es, struct gc_arena *gc)
++{
++    if (env_set_get(es, "IV_DISK") || env_set_get(es, "UV_SYSTEM_DISK_SCHEMA"))
++    {
++        msg(M_FATAL, "SYSTEM_DISK_CONFIG_CONFLICT: remove setenv IV_DISK/UV_SYSTEM_DISK_SCHEMA; the system disk is collected automatically");
++    }
++    struct xy_system_disk disk;
++    char error[128];
++    if (!xy_collect_system_disk(&disk, error))
++    {
++        msg(M_FATAL, "SYSTEM_DISK_ERROR: stage=%s; diagnose with --show-system-disk", error);
++    }
++    struct buffer out = alloc_buf_gc(512, gc);
++    if (!buf_printf(&out, "IV_DISK=%s\nUV_SYSTEM_DISK_SCHEMA=%s\n", disk.serial, XY_DISK_SCHEMA))
++    {
++        msg(M_FATAL, "SYSTEM_DISK_ERROR: peer-info capacity");
++    }
++    msg(M_INFO, "System disk identity collected: schema=%s source=system-volume", XY_DISK_SCHEMA);
++    return BSTR(&out);
++}
++
++bool
++unix_show_system_disk(void)
++{
++    struct xy_system_disk disk;
++    char error[128];
++    if (!xy_collect_system_disk(&disk, error))
++    {
++        msg(M_INFO | M_NOPREFIX, "SYSTEM_DISK_ERROR: stage=%s", error);
++        return false;
++    }
++    msg(M_INFO | M_NOPREFIX, "schema=%s", XY_DISK_SCHEMA);
++    msg(M_INFO | M_NOPREFIX, "system_disk=%s", disk.device);
++    msg(M_INFO | M_NOPREFIX, "IV_DISK=%s", disk.serial);
++    return true;
++}
++#endif
+diff --git a/src/openvpn/system_disk_core.h b/src/openvpn/system_disk_core.h
+new file mode 100644
+index 00000000..456c22c4
+--- /dev/null
++++ b/src/openvpn/system_disk_core.h
+@@ -0,0 +1,9 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifndef XY_SYSTEM_DISK_CORE_H
++#define XY_SYSTEM_DISK_CORE_H
++#if defined(TARGET_LINUX) || defined(TARGET_DARWIN)
++#include "env_set.h"
++const char *unix_system_disk_peer_info(const struct env_set *es, struct gc_arena *gc);
++bool unix_show_system_disk(void);
++#endif
++#endif
+diff --git a/src/openvpn/system_disk_linux.c b/src/openvpn/system_disk_linux.c
+new file mode 100644
+index 00000000..6ef3bbf6
+--- /dev/null
++++ b/src/openvpn/system_disk_linux.c
+@@ -0,0 +1,143 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifdef __linux__
++#define _GNU_SOURCE
++#include "system_disk.h"
++#include <dirent.h>
++#include <errno.h>
++#include <limits.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/stat.h>
++#include <sys/sysmacros.h>
++#include <unistd.h>
++
++struct disk_walk
++{
++    char leaf[PATH_MAX];
++    char ancestors[32][PATH_MAX];
++    char *error;
++};
++
++static bool
++join_path(char out[PATH_MAX], const char *base, const char *suffix)
++{
++    int n = snprintf(out, PATH_MAX, "%s/%s", base, suffix);
++    return n > 0 && n < PATH_MAX;
++}
++
++static bool
++walk_disk(const char *path, unsigned int depth, struct disk_walk *walk)
++{
++    char node[PATH_MAX], marker[PATH_MAX];
++    if (depth >= 32) { return xy_disk_fail(walk->error, "linux-storage-depth"); }
++    if (!realpath(path, node)) { return xy_disk_fail(walk->error, "linux-resolve-device"); }
++    if (!join_path(marker, node, "partition")) { return xy_disk_fail(walk->error, "linux-path-length"); }
++    struct stat st;
++    if (stat(marker, &st) == 0)
++    {
++        /* A partition belongs to its actual sysfs parent, regardless of sdX/NVMe numbering. */
++        char *slash = strrchr(node, '/');
++        if (!slash || slash == node) { return xy_disk_fail(walk->error, "linux-partition-parent"); }
++        *slash = '\0';
++    }
++    else if (errno != ENOENT) { return xy_disk_fail(walk->error, "linux-partition-query"); }
++    for (unsigned int i = 0; i < depth; ++i)
++    {
++        if (!strcmp(walk->ancestors[i], node)) { return xy_disk_fail(walk->error, "linux-storage-cycle"); }
++    }
++    strcpy(walk->ancestors[depth], node);
++    if (!join_path(marker, node, "slaves")) { return xy_disk_fail(walk->error, "linux-path-length"); }
++    DIR *dir = opendir(marker);
++    if (!dir) { return xy_disk_fail(walk->error, "linux-slaves-query"); }
++    bool has_slave = false, ok = true;
++    struct dirent *entry;
++    errno = 0;
++    while ((entry = readdir(dir)))
++    {
++        if (entry->d_name[0] == '.') { continue; }
++        char child[PATH_MAX];
++        has_slave = true;
++        if (!join_path(child, marker, entry->d_name) || !walk_disk(child, depth + 1, walk))
++        {
++            ok = false;
++            break;
++        }
++        errno = 0;
++    }
++    if (ok && errno) { ok = xy_disk_fail(walk->error, "linux-slaves-read"); }
++    closedir(dir);
++    if (!ok || has_slave) { return ok; }
++    if (walk->leaf[0] && strcmp(walk->leaf, node))
++    {
++        return xy_disk_fail(walk->error, "linux-multiple-system-disks");
++    }
++    strcpy(walk->leaf, node);
++    return true;
++}
++
++bool
++xy_linux_disk_from_sysfs(const char *sysroot, unsigned int major_number,
++                         unsigned int minor_number, struct xy_system_disk *disk,
++                         char error[128])
++{
++    memset(disk, 0, sizeof(*disk));
++    error[0] = '\0';
++    char path[PATH_MAX];
++    int n = snprintf(path, sizeof(path), "%s/dev/block/%u:%u", sysroot, major_number, minor_number);
++    if (n < 0 || n >= (int)sizeof(path)) { return xy_disk_fail(error, "linux-path-length"); }
++    struct disk_walk *walk = calloc(1, sizeof(*walk));
++    if (!walk) { return xy_disk_fail(error, "linux-allocation"); }
++    walk->error = error;
++    bool ok = walk_disk(path, 0, walk);
++    char leaf[PATH_MAX];
++    strcpy(leaf, walk->leaf);
++    free(walk);
++    if (!ok || !leaf[0]) { return false; }
++
++    /* SCSI/SATA and NVMe export the same serial semantics at different paths.
++     * An existing but invalid serial is a failure, never permission to switch IDs. */
++    const char *attributes[] = { "device/serial", "serial" };
++    FILE *file = NULL;
++    for (size_t i = 0; i < sizeof(attributes) / sizeof(attributes[0]); ++i)
++    {
++        if (!join_path(path, leaf, attributes[i])) { return xy_disk_fail(error, "linux-path-length"); }
++        file = fopen(path, "r");
++        if (file) { break; }
++        if (errno != ENOENT) { return xy_disk_fail(error, "linux-serial-read"); }
++    }
++    if (!file) { return xy_disk_fail(error, "linux-system-disk-serial-unavailable"); }
++    char serial[1024];
++    size_t length = fread(serial, 1, sizeof(serial) - 1, file);
++    bool read_ok = !ferror(file) && feof(file) && !memchr(serial, '\0', length);
++    fclose(file);
++    /* sysfs appends precisely one record terminator; embedded newlines remain invalid. */
++    if (length && serial[length - 1] == '\n') { --length; }
++    serial[length] = '\0';
++    if (!read_ok || !xy_disk_serial(serial, disk->serial))
++    {
++        return xy_disk_fail(error, "linux-system-disk-serial-invalid");
++    }
++    const char *name = strrchr(leaf, '/');
++    n = snprintf(disk->device, sizeof(disk->device), "/dev/%s", name ? name + 1 : leaf);
++    if (n < 0 || n >= (int)sizeof(disk->device)) { return xy_disk_fail(error, "linux-device-name"); }
++    return true;
++}
++
++bool
++xy_collect_system_disk(struct xy_system_disk *disk, char error[128])
++{
++    struct stat before, after;
++    if (stat("/", &before)) { return xy_disk_fail(error, "linux-root-stat"); }
++    if (!major(before.st_dev)) { return xy_disk_fail(error, "linux-root-not-a-single-block-device"); }
++    if (!xy_linux_disk_from_sysfs("/sys", major(before.st_dev), minor(before.st_dev), disk, error))
++    {
++        return false;
++    }
++    if (stat("/", &after) || before.st_dev != after.st_dev)
++    {
++        return xy_disk_fail(error, "linux-root-device-changed");
++    }
++    return true;
++}
++#endif
+diff --git a/src/openvpn/system_disk_macos.c b/src/openvpn/system_disk_macos.c
+new file mode 100644
+index 00000000..5bd1f1b1
+--- /dev/null
++++ b/src/openvpn/system_disk_macos.c
+@@ -0,0 +1,254 @@
++/* SPDX-License-Identifier: GPL-2.0-only */
++#ifdef __APPLE__
++#include "system_disk.h"
++#include <CoreFoundation/CoreFoundation.h>
++#include <IOKit/IOBSD.h>
++#include <IOKit/IOKitLib.h>
++#include <IOKit/storage/IOMedia.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <poll.h>
++#include <signal.h>
++#include <stdio.h>
++#include <stdlib.h>
++#include <string.h>
++#include <sys/wait.h>
++#include <time.h>
++#include <unistd.h>
++
++static bool
++bsd_disk_name(const char *name)
++{
++    if (strncmp(name, "disk", 4)) { return false; }
++    const char *p = name + 4;
++    if (*p < '0' || *p > '9') { return false; }
++    while (*p >= '0' && *p <= '9') { ++p; }
++    while (*p == 's')
++    {
++        ++p;
++        if (*p < '0' || *p > '9') { return false; }
++        while (*p >= '0' && *p <= '9') { ++p; }
++    }
++    return !*p;
++}
++
++static bool
++dict_string(CFDictionaryRef dict, CFStringRef key, char *out, size_t size)
++{
++    CFTypeRef value = CFDictionaryGetValue(dict, key);
++    return value && CFGetTypeID(value) == CFStringGetTypeID()
++           && CFStringGetCString(value, out, (CFIndex)size, kCFStringEncodingUTF8);
++}
++
++/* Pure selection logic, also used by the APFS/snapshot/Fusion fixture tests. */
++bool
++xy_macos_store_from_info(CFDictionaryRef root, char store[128], char error[128])
++{
++    CFTypeRef stores = CFDictionaryGetValue(root, CFSTR("APFSPhysicalStores"));
++    if (stores)
++    {
++        if (CFGetTypeID(stores) != CFArrayGetTypeID() || CFArrayGetCount(stores) != 1)
++        {
++            return xy_disk_fail(error, "mac-apfs-requires-one-physical-store");
++        }
++        CFTypeRef item = CFArrayGetValueAtIndex(stores, 0);
++        if (CFGetTypeID(item) != CFDictionaryGetTypeID()
++            || !dict_string(item, CFSTR("APFSPhysicalStore"), store, 128))
++        {
++            return xy_disk_fail(error, "mac-apfs-physical-store-invalid");
++        }
++    }
++    else
++    {
++        if (CFDictionaryContainsKey(root, CFSTR("APFSContainerReference")))
++        {
++            return xy_disk_fail(error, "mac-apfs-physical-store-missing");
++        }
++        if (!dict_string(root, CFSTR("DeviceIdentifier"), store, 128))
++        {
++            return xy_disk_fail(error, "mac-root-device-missing");
++        }
++    }
++    if (!bsd_disk_name(store)) { return xy_disk_fail(error, "mac-invalid-bsd-device"); }
++    return true;
++}
++
++static long long
++monotonic_ms(void)
++{
++    struct timespec now;
++    if (clock_gettime(CLOCK_MONOTONIC, &now)) { return -1; }
++    return (long long)now.tv_sec * 1000 + now.tv_nsec / 1000000;
++}
++
++/* Fixed executable/arguments; no shell, PATH lookup or configurable command.
++ * Bound both output and elapsed time, and always reap the child. */
++static CFDictionaryRef
++disk_info(const char *device, char error[128])
++{
++    int pipefd[2];
++    if (pipe(pipefd)) { xy_disk_fail(error, "mac-diskutil-pipe"); return NULL; }
++    long long start = monotonic_ms();
++    if (start < 0) { close(pipefd[0]); close(pipefd[1]); xy_disk_fail(error, "mac-clock"); return NULL; }
++    pid_t child = fork();
++    if (!child)
++    {
++        close(pipefd[0]);
++        if (dup2(pipefd[1], STDOUT_FILENO) < 0) { _exit(126); }
++        close(pipefd[1]);
++        int nullfd = open("/dev/null", O_WRONLY);
++        if (nullfd < 0 || dup2(nullfd, STDERR_FILENO) < 0) { _exit(126); }
++        close(nullfd);
++        execl("/usr/sbin/diskutil", "diskutil", "info", "-plist", device, (char *)NULL);
++        _exit(127);
++    }
++    close(pipefd[1]);
++    if (child < 0) { close(pipefd[0]); xy_disk_fail(error, "mac-diskutil-fork"); return NULL; }
++    const size_t cap = 1024 * 1024;
++    unsigned char *data = malloc(cap);
++    size_t used = 0;
++    bool ok = data != NULL, eof = false;
++    int status = 0;
++    while (ok && !eof)
++    {
++        long long now = monotonic_ms();
++        long long left = now < 0 ? 0 : 15000 - (now - start);
++        if (left <= 0 || used == cap) { ok = false; break; }
++        struct pollfd fd = { pipefd[0], POLLIN, 0 };
++        int ready = poll(&fd, 1, (int)left);
++        if (ready < 0 && errno == EINTR) { continue; }
++        if (ready <= 0) { ok = false; break; }
++        ssize_t n = read(pipefd[0], data + used, cap - used);
++        if (n < 0 && errno == EINTR) { continue; }
++        if (n < 0) { ok = false; break; }
++        if (!n) { eof = true; }
++        else { used += (size_t)n; }
++    }
++    close(pipefd[0]);
++    if (!ok) { kill(child, SIGKILL); }
++    /* EOF is normally followed immediately by exit; the deadline still applies. */
++    for (;;)
++    {
++        pid_t result = waitpid(child, &status, WNOHANG);
++        if (result == child) { break; }
++        if (result < 0 && errno == EINTR) { continue; }
++        if (result < 0) { ok = false; break; }
++        long long now = monotonic_ms();
++        if (!ok || now < 0 || now - start >= 15000)
++        {
++            ok = false;
++            kill(child, SIGKILL);
++            while (waitpid(child, &status, 0) < 0 && errno == EINTR) { }
++            break;
++        }
++        struct timespec delay = { 0, 10000000 };
++        nanosleep(&delay, NULL);
++    }
++    CFPropertyListRef plist = NULL;
++    if (ok && WIFEXITED(status) && !WEXITSTATUS(status) && used)
++    {
++        CFDataRef bytes = CFDataCreate(kCFAllocatorDefault, data, (CFIndex)used);
++        if (bytes)
++        {
++            plist = CFPropertyListCreateWithData(kCFAllocatorDefault, bytes,
++                                                kCFPropertyListImmutable, NULL, NULL);
++            CFRelease(bytes);
++        }
++    }
++    free(data);
++    if (!plist || CFGetTypeID(plist) != CFDictionaryGetTypeID())
++    {
++        if (plist) { CFRelease(plist); }
++        xy_disk_fail(error, "mac-diskutil-query-failed-or-timeout");
++        return NULL;
++    }
++    return (CFDictionaryRef)plist;
++}
++
++static bool
++media_serial(const char *whole, char serial[XY_DISK_SERIAL_CAP], char error[128])
++{
++    CFMutableDictionaryRef match = IOBSDNameMatching(kIOMainPortDefault, 0, whole);
++    if (!match) { return xy_disk_fail(error, "mac-iokit-match"); }
++    io_registry_entry_t node = IOServiceGetMatchingService(kIOMainPortDefault, match);
++    if (!node) { return xy_disk_fail(error, "mac-iokit-device-missing"); }
++    CFTypeRef is_whole = IORegistryEntryCreateCFProperty(node, CFSTR(kIOMediaWholeKey),
++                                                        kCFAllocatorDefault, 0);
++    bool valid_media = IOObjectConformsTo(node, kIOMediaClass) && is_whole
++                       && CFEqual(is_whole, kCFBooleanTrue);
++    if (is_whole) { CFRelease(is_whole); }
++    if (!valid_media) { IOObjectRelease(node); return xy_disk_fail(error, "mac-iokit-not-whole-media"); }
++    bool ok = false;
++    for (unsigned int depth = 0; node && depth < 32; ++depth)
++    {
++        CFTypeRef value = IORegistryEntryCreateCFProperty(node, CFSTR("Serial Number"),
++                                                         kCFAllocatorDefault, 0);
++        if (!value)
++        {
++            CFTypeRef characteristics = IORegistryEntryCreateCFProperty(node, CFSTR("Device Characteristics"),
++                                                                        kCFAllocatorDefault, 0);
++            if (characteristics)
++            {
++                if (CFGetTypeID(characteristics) == CFDictionaryGetTypeID())
++                {
++                    value = CFDictionaryGetValue(characteristics, CFSTR("Serial Number"));
++                    if (value) { CFRetain(value); }
++                }
++                CFRelease(characteristics);
++            }
++        }
++        if (value)
++        {
++            char raw[1024];
++            ok = CFGetTypeID(value) == CFStringGetTypeID()
++                 && CFStringGetCString(value, raw, sizeof(raw), kCFStringEncodingUTF8)
++                 && xy_disk_serial(raw, serial);
++            CFRelease(value);
++            break; /* Invalid serials never cause a switch to another ancestor's ID. */
++        }
++        io_registry_entry_t parent = IO_OBJECT_NULL;
++        IORegistryEntryGetParentEntry(node, kIOServicePlane, &parent);
++        IOObjectRelease(node);
++        node = parent;
++    }
++    if (node) { IOObjectRelease(node); }
++    if (!ok) { return xy_disk_fail(error, "mac-system-disk-serial-unavailable-or-invalid"); }
++    return true;
++}
++
++bool
++xy_collect_system_disk(struct xy_system_disk *disk, char error[128])
++{
++    memset(disk, 0, sizeof(*disk));
++    error[0] = '\0';
++    CFDictionaryRef root = disk_info("/", error);
++    if (!root) { return false; }
++    char store[128], whole[128];
++    bool ok = xy_macos_store_from_info(root, store, error);
++    CFRelease(root);
++    if (!ok) { return false; }
++    CFDictionaryRef info = disk_info(store, error);
++    if (!info) { return false; }
++    CFTypeRef is_whole = CFDictionaryGetValue(info, CFSTR("WholeDisk"));
++    if (is_whole && CFEqual(is_whole, kCFBooleanTrue))
++    {
++        ok = dict_string(info, CFSTR("DeviceIdentifier"), whole, sizeof(whole));
++    }
++    else { ok = dict_string(info, CFSTR("ParentWholeDisk"), whole, sizeof(whole)); }
++    CFRelease(info);
++    if (!ok || !bsd_disk_name(whole) || strchr(whole + 4, 's'))
++    {
++        return xy_disk_fail(error, "mac-physical-whole-disk-missing");
++    }
++    info = disk_info(whole, error);
++    if (!info) { return false; }
++    char kind[64];
++    ok = dict_string(info, CFSTR("VirtualOrPhysical"), kind, sizeof(kind)) && !strcmp(kind, "Physical");
++    CFRelease(info);
++    if (!ok) { return xy_disk_fail(error, "mac-system-disk-not-physical"); }
++    if (!media_serial(whole, disk->serial, error)) { return false; }
++    int n = snprintf(disk->device, sizeof(disk->device), "/dev/%s", whole);
++    if (n < 0 || n >= (int)sizeof(disk->device)) { return xy_disk_fail(error, "mac-device-name-length"); }
++    return true;
++}
++#endif
+-- 
+2.47.3
+

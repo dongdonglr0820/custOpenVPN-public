@@ -40,6 +40,10 @@ version="$("${RUN[@]}" --version | sed -n '1p')"
     echo "ERROR: unexpected version: $version"; exit 1;
 }
 echo "$version"
+native_info="$("${RUN[@]}" --show-system-disk)"
+printf '%s\n' "$native_info" > "$WORK/system-disk.log"
+NATIVE_DISK="$(sed -n 's/^IV_DISK=//p' <<<"$native_info")"
+[[ -n "$NATIVE_DISK" && "$NATIVE_DISK" != *$'\n'* ]] || { echo 'Invalid native disk diagnostic'; exit 1; }
 cd "$WORK"
 umask 077
 openssl req -x509 -newkey rsa:2048 -nodes -keyout ca.key -out ca.crt \
@@ -63,7 +67,7 @@ SERVER_PID=$!
     --remote 127.0.0.1 "$PORT" --ifconfig 10.253.0.2 10.253.0.1 \
     --cert client.crt --key client.key --remote-cert-tls server \
     --setenv IV_USER tls_test_user --setenv IV_INFO tls_test_uuid \
-    --setenv IV_DISK tls_test_disk --setenv IV_PLAT tls_test_platform \
+    --setenv IV_PLAT tls_test_platform \
     --setenv IV_NOT_ALLOWED must_not_be_forwarded --log client.log &
 CLIENT_PID=$!
 
@@ -82,7 +86,7 @@ grep -q 'Initialization Sequence Completed' client.log
 
 # Exact values also reject duplicate fields (sed would yield multiple lines).
 for pair in "IV_VER=$EXPECTED_VERSION" IV_USER=tls_test_user IV_INFO=tls_test_uuid \
-    IV_DISK=tls_test_disk IV_PLAT=tls_test_platform; do
+    "IV_DISK=$NATIVE_DISK" IV_PLAT=tls_test_platform; do
     key="${pair%%=*}"
     actual="$(sed -n "s/.*peer info: $key=//p" server.log)"
     [[ "$actual" = "${pair#*=}" ]] || {
@@ -92,4 +96,19 @@ done
 if grep -q 'peer info: IV_NOT_ALLOWED=' server.log; then
     echo 'ERROR: non-whitelisted field crossed peer-info boundary'; exit 1
 fi
-echo "PASS: ${E2E_ARCH:-native} TLS handshake, exact peer-info and whitelist" | tee result.log
+# A profile cannot substitute a data disk or inject a second disk field.
+"${RUN[@]}" "${COMMON[@]}" --tls-client --nobind --remote 127.0.0.1 "$PORT" \
+    --ifconfig 10.253.0.2 10.253.0.1 --cert client.crt --key client.key \
+    --remote-cert-tls server --setenv IV_DISK forged_data_disk --log conflict.log &
+CONFLICT_PID=$!
+for _ in {1..10}; do
+    kill -0 "$CONFLICT_PID" 2>/dev/null || break
+    sleep 1
+done
+if kill -0 "$CONFLICT_PID" 2>/dev/null; then
+    kill "$CONFLICT_PID"; wait "$CONFLICT_PID" || true
+    echo 'ERROR: identity override did not fail before handshake'; exit 1
+fi
+if wait "$CONFLICT_PID"; then echo 'ERROR: identity override returned success'; exit 1; fi
+grep -q 'SYSTEM_DISK_CONFIG_CONFLICT' conflict.log
+echo "PASS: ${E2E_ARCH:-native} native system-disk TLS, exact peer-info, whitelist and override rejection" | tee result.log

@@ -6,19 +6,19 @@
 #   CUST_DIR         custOpenVPN 仓库根（必填）
 #   OPENVPN_REF      上游 tag，默认 v2.7.8（Tunnelblick 需内置同版本 tarball）
 #   PATCH_FILE       peerinfo 补丁，相对 CUST_DIR，默认 patches/openvpn-peerinfo-spoof-<版本>.patch
-#   TUNNELBLICK_REF  Tunnelblick tag，默认 v10.0.1（仅用于产物命名）
-#   XY_VERSION       默认 xy2
+#   TUNNELBLICK_REF  Tunnelblick tag，默认 v10.0.2（仅用于产物命名）
+#   XY_VERSION       默认 xy3
 #   XY_DATE          默认当天 UTC
 #   OUT_DIR          产物目录，默认 $PWD/out
 #   XY_BUILD_JOBS    每个 OpenSSL 架构的编译并发（默认 CPU 数；各架构仍顺序构建）
 set -euo pipefail
 
-: "${CUST_DIR:?所需变量 CUST_DIR 未设置}"
+CUST_DIR="${CUST_DIR:?所需变量 CUST_DIR 未设置}"
 OPENVPN_REF="${OPENVPN_REF:-v2.7.8}"
 OPENVPN_VER="${OPENVPN_REF#v}"
 PATCH_FILE="${PATCH_FILE:-patches/openvpn-peerinfo-spoof-$OPENVPN_VER.patch}"
-TUNNELBLICK_REF="${TUNNELBLICK_REF:-v10.0.1}"
-XY_VERSION="${XY_VERSION:-xy2}"
+TUNNELBLICK_REF="${TUNNELBLICK_REF:-v10.0.2}"
+XY_VERSION="${XY_VERSION:-xy3}"
 XY_DATE="${XY_DATE:-$(date -u +%Y%m%d)}"
 XY_SUFFIX="$XY_VERSION-$XY_DATE"
 OUT_DIR="${OUT_DIR:-$PWD/out}"
@@ -36,6 +36,8 @@ mkdir -p "$PATCH_DIR"
 # 1) 注入 peerinfo 指纹补丁（文件名 99-* 保证排在 Tunnelblick 自带补丁之后）；
 #    sed 去 CR 兜底：防止补丁在 Windows 检出被转成 CRLF（patch -p1 会打不上）
 sed 's/\r$//' "$CUST_DIR/$PATCH_FILE" > "$PATCH_DIR/99-custom-peerinfo.diff"
+sed 's/\r$//' "$CUST_DIR/patches/openvpn-unix-system-disk-2.7.8.patch" \
+    > "$PATCH_DIR/99-custom-system-disk.diff"
 cp "$CUST_DIR/patches/tunnelblick-tuntap-format.patch" \
     third_party/sources/tuntap/tuntap-20141104/patches/99-custom-format.diff
 
@@ -85,6 +87,13 @@ make -C third_party TOPDIR="$PWD/third_party" built-openvpn-prepare
 (
     cd "third_party/build/openvpn/openvpn-$OPENVPN_VER/openvpn"
     autoreconf -fiv
+    for cpu in arm64 x86_64; do
+        clang -arch "$cpu" -std=c11 -Wall -Wextra -Werror \
+            -Isrc/openvpn "$CUST_DIR/tests/unix-system-disk/test_macos.c" \
+            src/openvpn/system_disk.c src/openvpn/system_disk_macos.c \
+            -framework CoreFoundation -framework IOKit -o "/tmp/xy-disk-tests-$cpu"
+        /usr/bin/arch "-$cpu" "/tmp/xy-disk-tests-$cpu"
+    done
 )
 
 # Upstream's tuntap recipe can mask an inner compiler failure with a final touch.

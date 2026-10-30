@@ -4,7 +4,7 @@
 保留 **peer-info 指纹上报**（`IV_USER / IV_INFO / IV_DISK / IV_PLAT`，用于测试服务端
 `clientConnecionValidator.py` 的设备绑定），版本号带 **xy** 标识与官方版本区分。
 
-Windows `xy2` 自动从 Windows 所在卷采集磁盘序列号，并通过原生模块采集设备 UUID 和当前用户；禁止配置覆盖这些字段。参见[实现说明](docs/windows-device-identity.md)和[Windows 测试步骤](docs/windows-testing.md)。
+Windows `xy3` 自动从 Windows 所在卷采集磁盘序列号，并通过原生模块采集设备 UUID 和当前用户；禁止配置覆盖这些字段。Linux/macOS `xy3` 同样从系统卷定位磁盘并自动生成 `IV_DISK`，其余用户/UUID 字段保留现有来源。参见[实现说明](docs/windows-device-identity.md)和[Windows 测试步骤](docs/windows-testing.md)。
 
 > Linux/macOS 旧版背景：测试服务端的兼容性检查 只认带齐 IV_* 指纹的客户端，缺字段即
 > `INCOMPATIBLE_CLIENT` 拒绝。指纹由客户端 `setenv IV_*` 写入，上游
@@ -17,6 +17,7 @@ custOpenVPN/
 ├── patches/                    补丁（唯一事实源，CI 直接应用）
 │   ├── openvpn-peerinfo-spoof-2.7.8.patch   全平台基线
 │   ├── openvpn-windows-device-identity-2.7.8.patch  Windows 原生身份采集
+│   ├── openvpn-unix-system-disk-2.7.8.patch  Linux/macOS 原生系统盘采集
 │   ├── tunnelblick-tuntap-format.patch   macOS 旧驱动日志格式兼容修正
 │   ├── openvpn-peerinfo-spoof-2.7.7.patch   历史全平台基线
 │   └── openvpn-peerinfo-spoof-2.6.14.patch  历史（办公网关 2.6.14 基线）
@@ -29,15 +30,21 @@ custOpenVPN/
 └── tunnelblick/                ┘ macOS 上游源码克隆
 ```
 
-## 当前全平台基线（2026-10-23）
+## 当前构建目标（2026-10-30）
 
-- Core：OpenVPN **2.7.8**，自定义版本 **xy2**。
-- Windows 构建：固定 `openvpn-build` 提交 `ecbfe78be2b86d53ff9fff6d89d55653d7a4b0ca`（2.7.8-I001），GUI 固定提交 `91c7fc056609d124bf29b348b23f678e35480563`，DCO 2.8.13、TAP 9.27.0。
-- Linux：amd64 / arm64 全静态核心，使用 2.7.8 的 peerinfo 补丁。
-- macOS：Tunnelblick **10.0.1**，内嵌 OpenVPN **2.7.8-xy2**，Universal 2（Intel + Apple Silicon），最低 macOS 13。使用上游 tarball 和补丁系列，再追加本仓库的 peerinfo 与版本戳补丁。
-- 原生系统盘身份补丁仅 Windows 使用；Linux/macOS 保留现有 `setenv IV_*` 上报方式。
-- Windows `2.7.8-xy2-20261023` 完整 MSI 已获用户实机测试可用反馈；具体连续重启次数、升级/回滚、ARM64 实机覆盖未另行记录。本轮 `only=unix` 复用此包，构建 Linux/macOS；验收步骤见 [Linux/macOS 测试说明](docs/unix-testing.md)。
-- Linux/macOS [CI 39921447098](https://github.com/dongdonglr0820/custOpenVPN-public/actions/runs/39921447098) 已全部通过（构建代码 `c48aa2684a931975e0ec966f3a1895860c1d33d2`）：Linux 双架构真实连接及缺字段拒绝测试；Mac 两种 OpenSSL 变体 × 两种架构的回环 TLS。下载后的校验值、Mac ZIP 完整性、GUI/核心 Universal 2 和最低 macOS 13.0 也已核对。
+- Core：上游最新稳定版 OpenVPN **2.7.8**，自定义版本 **xy3**。
+- Windows：固定正式发布的 `OpenVPN-2.7.8-I002` 对应 `openvpn-build` 提交 `420fa8333400114efa2bb272cc81c4c5b09c156f`；GUI 为发行包内的 `11.66.0.0`（`ee41d6d4738904bbf6a3d64271400e324c8e2e41`），DCO **2.8.14**、TAP 9.27.0。不跟随尚未发布的 release 分支 HEAD。
+- Linux：amd64 / arm64 全静态核心；根文件系统设备 → 分区父盘 / LVM、dm-crypt、RAID 的 slaves → 唯一底层盘的 serial。
+- macOS：Tunnelblick **10.0.2**，内嵌 OpenVPN **2.7.8-xy3**，Universal 2，最低 macOS 13。系统卷（含 APFS snapshot）→ APFS Physical Store → whole disk → 该盘 IORegistry serial。
+- 三端都只选择系统所在盘；多盘系统卷、无有效序列号或不支持的根文件系统明确失败，不取数据盘、USB 盘或第一块盘兜底。Linux 当前支持可由根设备号追踪的块设备文件系统，overlay、网络根和使用匿名设备号的 Btrfs 明确不支持。
+- Linux/macOS 自动生成 `IV_DISK`，禁止 `.ovpn` 的 `setenv IV_DISK` 或 `UV_SYSTEM_DISK_SCHEMA` 覆盖；`IV_USER / IV_INFO / IV_PLAT` 保留原采集来源。Windows 四字段的原生采集契约不变。
+- 新版诊断和迁移说明见 [系统盘设计](docs/unix-system-disk.md)与[Linux/macOS 测试说明](docs/unix-testing.md)。本轮全平台构建及验证结果待 CI 回填，不沿用 xy2 验收结论。
+
+### 已验收的上一版（2026-10-23，xy2）
+
+Windows `2.7.8-xy2-20261023` MSI 已获用户实机可用反馈，具体连续重启、升级/回滚和 ARM64 实机覆盖未记录。[Windows CI 39900900006](https://github.com/dongdonglr0820/custOpenVPN-public/actions/runs/39900900006)。
+
+Linux/macOS [CI 39921447098](https://github.com/dongdonglr0820/custOpenVPN-public/actions/runs/39921447098) 全部通过；当时 Linux/macOS 的 `IV_DISK` 仍由配置传入，不代表已经自动选择系统盘。
 
 ## 上次全平台基线（2026-09-17）
 
@@ -70,23 +77,23 @@ custOpenVPN/
 ## CI（.github/workflows/build-clients.yml）
 
 - **windows-msi**：`windows-2022` × [amd64, arm64]。checkout 上述固定 openvpn-build
-  提交（含 vcpkg/WiX 工具链）→ 把 `src/openvpn` 换成 v2.7.8 + 指纹及原生身份补丁 →
+  提交（含 vcpkg/WiX 工具链）→ 把 `src/openvpn` 换成 v2.7.8 + 指纹及 Windows 原生身份补丁 →
   打 xy 版本戳 → `build-and-package.ps1` 出 MSI（未签名，签名后续接）。
 - **linux**：容器内构建（默认 `ubuntu:22.04`）× [amd64, arm64]。**默认全静态单文件**
   （`STATIC=0` 可切回动态链接）。amd64 / arm64 分别在 `ubuntu-24.04` / `ubuntu-24.04-arm`
-  原生构建并测试。产物：`openvpn-2.7.8-xy2-20261023-linux-<arch>.tar.gz` + sha256。
+  原生构建并测试。产物：`openvpn-2.7.8-xy3-<日期>-linux-<arch>.tar.gz` + sha256。
   静态配方（已实测）：configure 加 `LDFLAGS=-static`（暴露 -lz/-lzstd 静态依赖）+
   make 覆盖 `LDFLAGS=-all-static`（libtool 会吃掉 `-static`）+ `OPENSSL_LIBS="-lssl -lcrypto -lz -lzstd"`；
   脚本内置「非静态即拒绝出包」断言。两架构打包完成后都会运行真实 E2E：
   解包最终 tar.gz，启动本地 OpenVPN server，再用交付二进制作为 client 完成 TLS/VPN 握手，
   服务端 `client-connect` 必须实际收到 `IV_USER / IV_INFO / IV_DISK / IV_PLAT / IV_VER`；
-  同时断言非白名单 `IV_NOT_ALLOWED` 不得被转发。注意：glibc 静态包对 **DNS 域名** 解析有已知限制，
+  同时断言非白名单 `IV_NOT_ALLOWED` 不得被转发，`setenv IV_DISK` 覆盖必须在 TLS 前拒绝。最终二进制还会在隔离 mount namespace 中验证“系统盘不是第一块盘”、缺 serial 拒绝及恢复；CI 没有原生 serial 时明确记录，不能把合成拓扑当成真实硬件验收。注意：glibc 静态包对 **DNS 域名** 解析有已知限制，
   测试配置的 `.ovpn` remote 均为 IP，无影响；若未来出现域名远端，请用动态构建。
-- **macos-tunnelblick**（未做 Developer ID 签名/公证）：`macos-15`；checkout Tunnelblick `v10.0.1` →
+- **macos-tunnelblick**（未做 Developer ID 签名/公证）：`macos-15`；checkout Tunnelblick `v10.0.2` →
   把 peerinfo 补丁 + 现场生成的版本戳补丁注入其
   `third_party/sources/openvpn/openvpn-2.7.8/patches/` → `make -C third_party` →
   `xcodebuild -alltargets Release`（工程内置的 BuildAppsAndDmgs.sh 自动打包/adhoc 签名）→
-  产物 `Tunnelblick-10.0.1-openvpn-2.7.8-xy2-20261023-unsigned.zip`（+ dmg 若生成）及 SHA256。
+  产物 `Tunnelblick-10.0.2-openvpn-2.7.8-xy3-<日期>-unsigned.zip`（+ dmg 若生成）及 SHA256。
   强制校验内嵌 OpenVPN 为 Universal 2（`x86_64 + arm64`），两种 OpenSSL 变体的两种架构均通过回环 TLS 验证版本及指纹字段。
   工具链限制为 Xcode 26.0.1–26.3，以保留 Intel 编译支持；x86_64 测试使用 Rosetta。
   先用当前 autotools 重新生成核心构建文件，校验 TUN/TAP 实际产物；OpenSSL 通过 make jobserver 并行编译。第三方构建成功后写入上游 `do-not-clean` 标记，防止 Xcode 清空并重复编译已准备好的依赖。
@@ -130,7 +137,7 @@ custOpenVPN/
 - [x] Windows 原生稳定系统盘/UUID/用户采集、服务查询与诊断；[实现说明](docs/windows-device-identity.md)
 - [x] Windows 最终 MSI：用户反馈实机测试完成、可用（2026-10-23；具体测试覆盖未另行记录）
 - [ ] MSI 品牌名/发布者（`PRODUCT_NAME` / `PRODUCT_PUBLISHER`，现暂留 OpenVPN）
-- [x] macOS：Tunnelblick CI 接入；当前升级至 v10.0.1，产物检查 Universal 2 + 版本戳 + 指纹 TLS 上报
+- [x] macOS：Tunnelblick CI 接入；当前升级至 v10.0.2，产物检查 Universal 2 + 版本戳 + 指纹 TLS 上报
 - [ ] macOS 品牌 / 正式签名（notarize 需要 Apple 证书；当前只出 adhoc 未签名测试包）
 - [x] Linux 产物：默认全静态单文件（`tar.gz` + sha256；`STATIC=0` 可切动态）
 - [ ] 代码签名（Windows Authenticode；macOS notarize）

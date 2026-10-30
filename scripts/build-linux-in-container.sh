@@ -6,7 +6,7 @@
 #
 # 约定环境变量:
 #   OPENVPN_REF   上游 tag（默认 v2.7.8）
-#   XY_VERSION    定制序号（默认 xy2）
+#   XY_VERSION    定制序号（默认 xy3）
 #   XY_DATE       发版日期 YYYYMMDD（默认取构建当天 UTC；CI 会显式传入保持跨平台一致）
 #   PATCH_FILE    peerinfo 补丁绝对路径（默认 /cust/patches/openvpn-peerinfo-spoof-<版本>.patch）
 #   OUT_DIR       产物目录（默认 /out）
@@ -15,7 +15,7 @@ set -euo pipefail
 
 ARCH="${1:?usage: $0 <amd64|arm64>}"
 OPENVPN_REF="${OPENVPN_REF:-v2.7.8}"
-XY_VERSION="${XY_VERSION:-xy2}"
+XY_VERSION="${XY_VERSION:-xy3}"
 XY_DATE="${XY_DATE:-$(date -u +%Y%m%d)}"
 XY_SUFFIX="${XY_VERSION}-${XY_DATE}"
 PATCH_FILE="${PATCH_FILE:-/cust/patches/openvpn-peerinfo-spoof-${OPENVPN_REF#v}.patch}"
@@ -27,13 +27,15 @@ STATIC="${STATIC:-1}"
 apt-get update
 apt-get install -y --no-install-recommends \
     ca-certificates git build-essential autoconf automake libtool pkg-config \
-    libssl-dev libcap-ng-dev liblz4-dev zlib1g-dev libzstd-dev python3-docutils file
+    libssl-dev libcap-ng-dev liblz4-dev zlib1g-dev libzstd-dev python3-docutils file python3
 
 WORK="$(mktemp -d /tmp/custovpn-XXXXXX)"
 git clone --depth 1 --branch "$OPENVPN_REF" https://github.com/OpenVPN/openvpn.git "$WORK/openvpn"
 cd "$WORK/openvpn"
 
 git apply "$PATCH_FILE"
+git apply /cust/patches/openvpn-unix-system-disk-2.7.8.patch
+python3 /cust/tests/unix-system-disk/test_linux.py "$WORK/openvpn/src/openvpn"
 
 # 定制版本号：PRODUCT_VERSION_PATCH [.7] -> [.7-xy1-20260917]
 # autotools 与 CMake 两套构建都从这一行拼 PACKAGE_VERSION（--version / IV_VER）。
@@ -85,7 +87,7 @@ mkdir -p "$STAGE/bin" "$STAGE/share/doc/openvpn"
 install -m755 src/openvpn/openvpn "$STAGE/bin/openvpn"
 install -m644 COPYING "$STAGE/share/doc/openvpn/COPYING"
 {
-    echo "OpenVPN $VERSION (custom build: peer-info fingerprint forwarding)"
+    echo "OpenVPN $VERSION (custom build: native system-volume disk identity)"
     echo "target: linux/$ARCH"
     echo "source: OpenVPN/openvpn $OPENVPN_REF + $(basename "$PATCH_FILE")"
     echo "link: $([ "$STATIC" = "1" ] && echo "static (single file)" || echo "dynamic")"

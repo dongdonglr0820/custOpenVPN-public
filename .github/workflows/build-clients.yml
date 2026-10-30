@@ -30,7 +30,7 @@ env:
   OPENVPN_REF: v2.7.8
   PATCH_FILE: patches/openvpn-peerinfo-spoof-2.7.8.patch
   # ==== 自定义版本：<上游>-<XY_VERSION>-<XY_DATE>，每次自定义发布 xyN +1 ====
-  XY_VERSION: xy2
+  XY_VERSION: xy3
   # Linux 构建容器（默认全静态单文件，兼容面最大）
   LINUX_BUILD_IMAGE: ubuntu:22.04
 
@@ -44,8 +44,8 @@ jobs:
       matrix:
         arch: [amd64, arm64]
     env:
-      # All platforms share the core baseline; native identity is Windows-only.
-      OPENVPN_BUILD_REF: ecbfe78be2b86d53ff9fff6d89d55653d7a4b0ca
+      # All platforms share the core baseline; Windows identity uses the native system-volume collector.
+      OPENVPN_BUILD_REF: 420fa8333400114efa2bb272cc81c4c5b09c156f
       WINDOWS_IDENTITY_PATCH: patches/openvpn-windows-device-identity-2.7.8.patch
       WIX: ${{ github.workspace }}\wix\
       VCPKG_BINARY_SOURCES: clear;files,${{ github.workspace }}/vcpkg_cache,readwrite
@@ -264,7 +264,7 @@ jobs:
           test -n "$bin"
           E2E_WORK_DIR="$PWD/e2e-peerinfo-logs" \
           EXPECTED_VERSION="${OPENVPN_REF#v}-${XY_VERSION}-${XY_DATE}" \
-            bash scripts/e2e-peerinfo.sh "$bin"
+            bash scripts/e2e-linux-system-disk.sh "$bin"
 
       - name: Upload E2E diagnostics
         if: always()
@@ -272,12 +272,9 @@ jobs:
         with:
           name: e2e-peerinfo-linux-${{ matrix.arch }}
           path: |
-            e2e-peerinfo-logs/server.log
-            e2e-peerinfo-logs/client.log
-            e2e-peerinfo-logs/client-missing-disk.log
-            e2e-peerinfo-logs/client-connect-valid.env
-            e2e-peerinfo-logs/client-connect-missing-disk.env
-            e2e-peerinfo-logs/client-connect.env
+            e2e-peerinfo-logs/**/*.log
+            e2e-peerinfo-logs/**/*.env
+            e2e-peerinfo-logs/*.log
           if-no-files-found: warn
 
       - name: Upload Linux artifact
@@ -294,7 +291,7 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 300
     env:
-      TUNNELBLICK_REF: v10.0.1
+      TUNNELBLICK_REF: v10.0.2
     steps:
       - name: Checkout custOpenVPN
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
