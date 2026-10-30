@@ -15,7 +15,7 @@ on:
           - macos
         default: all
   push:
-    branches: ["ci/final-validation"]
+    branches: ["ci/final-validation", "feature/all-clients-system-disk-xy3"]
     tags: ["v*"]
 
 permissions:
