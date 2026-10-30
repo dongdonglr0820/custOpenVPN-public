@@ -22,19 +22,20 @@ fixture_property(io_registry_entry_t entry, CFStringRef key, CFAllocatorRef allo
     return IORegistryEntryCreateCFProperty(entry, key, allocator, options);
 }
 
-static Boolean
-fixture_string(CFStringRef value, char *buffer, CFIndex size, CFStringEncoding encoding)
+static const void *
+fixture_dictionary(CFDictionaryRef dictionary, const void *key)
 {
-    /* The VM has a virtual backing device. Only this non-shipping provider
-     * substitutes its kind; APFS/root-to-whole-disk selection stays native. */
-    if (size == 64 && encoding == kCFStringEncodingUTF8 && CFEqual(value, CFSTR("Virtual")))
-    {
-        const char physical[] = "Physical";
-        if (size < (CFIndex)sizeof(physical)) { return false; }
-        memcpy(buffer, physical, sizeof(physical));
-        return true;
-    }
-    return CFStringGetCString(value, buffer, size, encoding);
+    /* Stub the hardware-kind property itself, not string conversion used by
+     * unrelated CoreFoundation code or plist serialization. */
+    if (CFEqual(key, CFSTR("VirtualOrPhysical"))) { return CFSTR("Physical"); }
+    return CFDictionaryGetValue(dictionary, key);
+}
+
+__attribute__((constructor)) static void
+fixture_loaded(void)
+{
+    const char marker[] = "TEST_ONLY_DEVICE_PROVIDER_LOADED\n";
+    (void)write(STDERR_FILENO, marker, sizeof(marker) - 1);
 }
 
 static int
@@ -70,5 +71,5 @@ fixture_execl(const char *path, const char *first, ...)
     { (const void *)(replacement_function), (const void *)(original_function) }
 
 XY_INTERPOSE(fixture_property, IORegistryEntryCreateCFProperty);
-XY_INTERPOSE(fixture_string, CFStringGetCString);
+XY_INTERPOSE(fixture_dictionary, CFDictionaryGetValue);
 XY_INTERPOSE(fixture_execl, execl);
