@@ -22,7 +22,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: build-clients-${{ github.workflow }}-${{ github.ref }}
+  group: build-clients-${{ github.workflow }}-${{ github.ref }}-xy3
   cancel-in-progress: true
 
 env:

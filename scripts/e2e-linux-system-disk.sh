@@ -44,7 +44,16 @@ else
 fi
 
 FIXTURE="$(mktemp -d)"
-trap 'rm -rf "$FIXTURE"' EXIT
+cleanup_fixture() {
+    local rc=$?
+    trap - EXIT
+    # The unchanged artifact runs as root inside the private namespace; GitHub's
+    # artifact uploader runs as the runner user and must be able to read logs.
+    if ! sudo chown -R "$(id -u):$(id -g)" "$WORK"; then rc=1; fi
+    rm -rf "$FIXTURE"
+    exit "$rc"
+}
+trap cleanup_fixture EXIT
 python3 - "$FIXTURE" <<'PY'
 import os
 import pathlib
